@@ -16,6 +16,16 @@ if (url.pathname === "/api/domain_scan") return json(await scanDomain("vinet.co.
 if (url.pathname === "/api/live_attack") return json(await getLiveAttack(env))
 if (url.pathname === "/api/reputation") return json(await getReputation(env))
 
+if (url.pathname === "/api/domain_lookup") {
+const domain = url.searchParams.get("domain")
+return json(await lookupDomain(domain))
+}
+
+if (url.pathname === "/api/bulk_lookup") {
+const domains = url.searchParams.get("domains").split(",")
+return json(await bulkLookup(domains))
+}
+
 return new Response(html,{headers:{ "content-type":"text/html"}})
 
 }
@@ -40,53 +50,81 @@ return data.Answer || []
 
 }
 
-async function scanDomain(domain){
+async function lookupDomain(domain){
 
-const spfRecords=await dnsQuery(domain,"TXT")
-const dmarcRecords=await dnsQuery("_dmarc."+domain,"TXT")
-const bimiRecords=await dnsQuery("default._bimi."+domain,"TXT")
-const mxRecords=await dnsQuery(domain,"MX")
+if(!domain) return {}
 
-let spf="missing"
-let dmarc="missing"
-let bimi="missing"
-let mx="missing"
-let dkim="missing"
+const spf = await dnsQuery(domain,"TXT")
+const dmarc = await dnsQuery("_dmarc."+domain,"TXT")
+const mx = await dnsQuery(domain,"MX")
+const bimi = await dnsQuery("default._bimi."+domain,"TXT")
 
-spfRecords.forEach(r=>{
-if(r.data.includes("v=spf1")) spf="valid"
+let spfStatus="missing"
+let dmarcStatus="missing"
+let dkimStatus="missing"
+let mxStatus="missing"
+let bimiStatus="missing"
+
+spf.forEach(r=>{
+if(r.data.includes("v=spf1")) spfStatus="valid"
 })
 
-dmarcRecords.forEach(r=>{
-if(r.data.includes("p=reject")) dmarc="reject"
-else if(r.data.includes("p=quarantine")) dmarc="quarantine"
-else dmarc="none"
+dmarc.forEach(r=>{
+if(r.data.includes("p=reject")) dmarcStatus="reject"
+else if(r.data.includes("p=quarantine")) dmarcStatus="quarantine"
+else dmarcStatus="none"
 })
 
-if(bimiRecords.length>0) bimi="detected"
-if(mxRecords.length>0) mx="valid"
+if(mx.length>0) mxStatus="valid"
+if(bimi.length>0) bimiStatus="detected"
 
 const selectors=["selector1","selector2","default","google","k1","mail"]
 
 for(const s of selectors){
 
-const result = await dnsQuery(s+"._domainkey."+domain,"TXT")
+const res=await dnsQuery(s+"._domainkey."+domain,"TXT")
 
-if(result.length>0){
-dkim="detected"
+if(res.length>0){
+dkimStatus="detected"
 break
 }
 
 }
 
-let compliance=0
+let advice=[]
 
-if(spf==="valid") compliance+=25
-if(dkim==="detected") compliance+=25
-if(dmarc==="reject") compliance+=25
-if(bimi==="detected") compliance+=25
+if(spfStatus==="missing") advice.push("Missing SPF record")
+if(dmarcStatus==="none") advice.push("DMARC policy set to none")
+if(dkimStatus==="missing") advice.push("DKIM not detected")
+if(mxStatus==="missing") advice.push("No MX records configured")
+if(bimiStatus==="missing") advice.push("BIMI not configured")
 
-return {spf,dmarc,dkim,bimi,mx,compliance}
+return {
+domain,
+spf:spfStatus,
+dkim:dkimStatus,
+dmarc:dmarcStatus,
+mx:mxStatus,
+bimi:bimiStatus,
+issues:advice.length,
+advice
+}
+
+}
+
+async function bulkLookup(domains){
+
+const results=[]
+
+for(const d of domains){
+
+const r=await lookupDomain(d.trim())
+
+results.push(r)
+
+}
+
+return results
 
 }
 
@@ -170,17 +208,13 @@ return r.results
 
 async function getLiveAttack(env){
 
-const r=await env.DB.prepare(`
-
-SELECT source_ip,
+const r=await env.DB.prepare(`SELECT source_ip,
 SUM(count) failures
 FROM dmarc_records
 WHERE disposition!='none'
 GROUP BY source_ip
 ORDER BY failures DESC
-LIMIT 1
-
-`).first()
+LIMIT 1`).first()
 
 return r || {}
 
@@ -188,18 +222,14 @@ return r || {}
 
 async function getReputation(env){
 
-const rows=await env.DB.prepare(`
-
-SELECT
+const rows=await env.DB.prepare(`SELECT
 source_ip,
 SUM(count) total,
 SUM(CASE WHEN disposition!='none' THEN count ELSE 0 END) failures
 FROM dmarc_records
 GROUP BY source_ip
 ORDER BY total DESC
-LIMIT 10
-
-`).all()
+LIMIT 10`).all()
 
 const results=[]
 
@@ -298,33 +328,25 @@ font-weight:bold;
 color:#e30613;
 }
 
+textarea{
+width:100%;
+height:80px;
+}
+
 table{
 width:100%;
 border-collapse:collapse;
+font-size:13px;
 }
 
 td,th{
 padding:6px;
 border-bottom:1px solid #ddd;
-font-size:13px;
 }
 
 .bad{color:red;font-weight:bold}
 .warn{color:orange;font-weight:bold}
 .good{color:green;font-weight:bold}
-
-canvas{
-height:200px!important;
-}
-
-.alert{
-background:#ffe8e8;
-border-left:5px solid #e30613;
-padding:12px;
-margin-bottom:20px;
-display:none;
-font-weight:bold;
-}
 
 </style>
 
@@ -342,7 +364,22 @@ font-weight:bold;
 
 <div class="container">
 
-<div id="alert" class="alert"></div>
+<div class="card">
+
+<h3>Domain Analyzer</h3>
+
+<input id="domainInput" placeholder="example.com">
+<button onclick="scanDomain()">Scan</button>
+
+<br><br>
+
+<textarea id="bulkDomains" placeholder="example.com&#10;vinet.co.za"></textarea>
+
+<button onclick="bulkScan()">Bulk Scan</button>
+
+<div id="domainResult"></div>
+
+</div>
 
 <div class="grid">
 
@@ -359,21 +396,6 @@ font-weight:bold;
 <div class="card">
 <h3>Email Authentication</h3>
 <ul id="scan"></ul>
-</div>
-
-<div class="card">
-<h3>Email Timeline</h3>
-<canvas id="timeline"></canvas>
-</div>
-
-<div class="card">
-<h3>Spoof Attacks</h3>
-<canvas id="attacks"></canvas>
-</div>
-
-<div class="card">
-<h3>Providers</h3>
-<canvas id="providers"></canvas>
 </div>
 
 <div class="card">
@@ -397,134 +419,60 @@ font-weight:bold;
 
 <script>
 
-function animateValue(el,end){
+async function scanDomain(){
 
-let start=0
-let step=end/20
+const domain=document.getElementById("domainInput").value
 
-function update(){
+const r=await fetch("/api/domain_lookup?domain="+domain)
 
-start+=step
-
-if(start>=end){
-el.innerHTML=end
-return
-}
-
-el.innerHTML=Math.round(start)
-
-requestAnimationFrame(update)
-
-}
-
-update()
-
-}
-
-async function loadScore(){
-
-const r=await fetch('/api/score')
 const d=await r.json()
 
-animateValue(score,d.score)
+renderResults([d])
 
 }
 
-async function loadScan(){
+async function bulkScan(){
 
-const r=await fetch('/api/domain_scan')
+const raw=document.getElementById("bulkDomains").value
+
+const domains=raw.split("\\n").join(",")
+
+const r=await fetch("/api/bulk_lookup?domains="+domains)
+
 const d=await r.json()
 
-scan.innerHTML=""
-
-scan.innerHTML+="<li>SPF: "+d.spf+"</li>"
-scan.innerHTML+="<li>DMARC: "+d.dmarc+"</li>"
-scan.innerHTML+="<li>DKIM: "+d.dkim+"</li>"
-scan.innerHTML+="<li>BIMI: "+d.bimi+"</li>"
-scan.innerHTML+="<li>MX: "+d.mx+"</li>"
-
-animateValue(compliance,d.compliance)
+renderResults(d)
 
 }
 
-async function loadAlert(){
+function renderResults(data){
 
-const r=await fetch('/api/live_attack')
-const d=await r.json()
+let html="<table><tr><th>Domain</th><th>SPF</th><th>DKIM</th><th>DMARC</th><th>MX</th><th>BIMI</th><th>Issues</th></tr>"
 
-if(d.failures>50){
-
-alert.style.display="block"
-
-alert.innerHTML="⚠ Active Spoof Attempt Detected — IP "+d.source_ip+" ("+d.failures+" failed emails)"
-
-}
-
-}
-
-async function loadReputation(){
-
-const r=await fetch('/api/reputation')
-const d=await r.json()
-
-let html="<tr><th>IP</th><th>Total</th><th>Failures</th><th>Status</th></tr>"
-
-d.forEach(x=>{
-
-let cls="good"
-
-if(x.reputation==="Suspicious") cls="warn"
-if(x.reputation==="Malicious") cls="bad"
+data.forEach(d=>{
 
 html+="<tr>"
-html+="<td>"+x.ip+"</td>"
-html+="<td>"+x.total+"</td>"
-html+="<td>"+x.failures+"</td>"
-html+="<td class='"+cls+"'>"+x.reputation+"</td>"
+html+="<td>"+d.domain+"</td>"
+html+="<td>"+d.spf+"</td>"
+html+="<td>"+d.dkim+"</td>"
+html+="<td>"+d.dmarc+"</td>"
+html+="<td>"+d.mx+"</td>"
+html+="<td>"+d.bimi+"</td>"
+html+="<td>"+d.issues+"</td>"
 html+="</tr>"
 
 })
 
-reputation.innerHTML=html
+html+="</table>"
+
+domainResult.innerHTML=html
 
 }
-
-async function chart(endpoint,canvas,label){
-
-const r=await fetch(endpoint)
-const d=await r.json()
-
-new Chart(canvas,{
-type:'bar',
-data:{
-labels:d.map(x=>x.day||x.source_ip||x.domain||x.org),
-datasets:[{
-label:label,
-data:d.map(x=>x.total||x.attacks),
-backgroundColor:"#e30613"
-}]
-},
-options:{
-plugins:{legend:{display:false}}
-}
-})
-
-}
-
-loadScore()
-loadScan()
-loadAlert()
-loadReputation()
-
-chart('/api/timeline',timeline,'Emails')
-chart('/api/attack_timeline',attacks,'Spoof Attacks')
-chart('/api/providers',providers,'Providers')
-chart('/api/senders',senders,'Emails')
-chart('/api/domains',domains,'Emails')
 
 </script>
 
 </body>
+
 </html>
 
 `
