@@ -1,11 +1,12 @@
-import { getTimeline } from "./api/timeline"
-import { getSenders } from "./api/senders"
-import { getDomains } from "./api/domains"
-import { getReputation } from "./api/reputation"
-import { getLiveAttack } from "./api/liveAttack"
-import { getIPDetails,getDomainDetails,getDayDetails } from "./api/drilldown"
-import { lookupDomain } from "./api/domainLookup"
-import { explainAI } from "./ai/explain"
+
+import { getTimeline } from "./api/timeline.js"
+import { getSenders } from "./api/senders.js"
+import { getDomains } from "./api/domains.js"
+import { getReputation } from "./api/reputation.js"
+import { getLiveAttack } from "./api/liveAttack.js"
+import { getIPDetails,getDomainDetails,getDayDetails } from "./api/drilldown.js"
+import { lookupDomain } from "./api/domainLookup.js"
+import { explainAI } from "./ai/explain.js"
 import html from "./ui/dashboard.html"
 
 export default {
@@ -46,9 +47,7 @@ const data = await request.json()
 return json({text:await explainAI(env,data)})
 }
 
-return new Response(html,{
-headers:{"content-type":"text/html"}
-})
+return new Response(html,{headers:{"content-type":"text/html"}})
 
 }
 
