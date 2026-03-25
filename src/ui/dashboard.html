@@ -1,1 +1,93 @@
 
+<html>
+<head>
+<title>Vinet DMARC Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+body{font-family:system-ui;margin:0;background:#f4f6f9}
+.header{background:white;border-bottom:3px solid #e30613;padding:15px;display:flex;gap:10px}
+.logo{height:36px}
+.container{max-width:1400px;margin:auto;padding:30px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.card{background:white;padding:20px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,.08)}
+</style>
+</head>
+<body>
+
+<div class="header">
+<img src="https://static.vinet.co.za/logo.jpeg" class="logo">
+<strong>Vinet DMARC Security Dashboard</strong>
+</div>
+
+<div class="container">
+
+<div class="grid">
+
+<div class="card">
+<h3>Email Timeline</h3>
+<canvas id="timeline"></canvas>
+</div>
+
+<div class="card">
+<h3>Top Senders</h3>
+<canvas id="senders"></canvas>
+</div>
+
+<div class="card">
+<h3>Domains</h3>
+<canvas id="domains"></canvas>
+</div>
+
+</div>
+
+</div>
+
+<script>
+
+async function loadTimeline(){
+const r=await fetch("/api/timeline")
+const d=await r.json()
+
+new Chart(timeline,{
+type:"bar",
+data:{
+labels:d.map(x=>x.day),
+datasets:[{label:"Emails",data:d.map(x=>x.total)}]
+}
+})
+}
+
+async function loadSenders(){
+const r=await fetch("/api/senders")
+const d=await r.json()
+
+new Chart(senders,{
+type:"bar",
+data:{
+labels:d.map(x=>x.source_ip),
+datasets:[{label:"Emails",data:d.map(x=>x.total)}]
+}
+})
+}
+
+async function loadDomains(){
+const r=await fetch("/api/domains")
+const d=await r.json()
+
+new Chart(domains,{
+type:"bar",
+data:{
+labels:d.map(x=>x.domain),
+datasets:[{label:"Emails",data:d.map(x=>x.total)}]
+}
+})
+}
+
+loadTimeline()
+loadSenders()
+loadDomains()
+
+</script>
+
+</body>
+</html>
