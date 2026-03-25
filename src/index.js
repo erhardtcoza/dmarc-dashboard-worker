@@ -2,6 +2,7 @@
 import { getTimeline } from "./api/timeline.js"
 import { getSenders } from "./api/senders.js"
 import { getDomains } from "./api/domains.js"
+import { addDomain,listDomains,scanDomain } from "./api/domainsManager.js"
 import { getReputation } from "./api/reputation.js"
 import { getLiveAttack } from "./api/liveAttack.js"
 import { getIPDetails,getDomainDetails,getDayDetails } from "./api/drilldown.js"
@@ -21,6 +22,18 @@ return json(await getTimeline(env))
 if(url.pathname==="/api/senders")
 return json(await getSenders(env))
 
+if(url.pathname==="/api/domains/add"){
+return json(await addDomain(env,url.searchParams.get("domain")))
+}
+
+if(url.pathname==="/api/domains/list"){
+return json(await listDomains(env))
+}
+
+if(url.pathname==="/api/domains/scan"){
+return json(await scanDomain(env,url.searchParams.get("domain")))
+}
+  
 if(url.pathname==="/api/domains")
 return json(await getDomains(env))
 
