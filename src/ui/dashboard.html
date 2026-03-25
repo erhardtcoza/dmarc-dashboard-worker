@@ -1,9 +1,8 @@
+
 <html>
 
 <head>
-
-<title>Vinet DMARC Security Dashboard</title>
-
+<title>Vinet DMARC Security Platform</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <style>
@@ -32,41 +31,13 @@ margin:auto;
 padding:30px;
 }
 
-.grid{
-display:grid;
-grid-template-columns:repeat(3,1fr);
-gap:20px;
-}
-
 .card{
 background:white;
 padding:20px;
 border-radius:8px;
+margin-bottom:20px;
 box-shadow:0 2px 6px rgba(0,0,0,.08);
 }
-
-.alert{
-background:#ffe8e8;
-border-left:5px solid #e30613;
-padding:10px;
-margin-bottom:20px;
-display:none;
-}
-
-table{
-width:100%;
-border-collapse:collapse;
-font-size:13px;
-}
-
-td,th{
-padding:6px;
-border-bottom:1px solid #eee;
-}
-
-.bad{color:red;font-weight:bold}
-.warn{color:orange;font-weight:bold}
-.good{color:green;font-weight:bold}
 
 </style>
 
@@ -76,60 +47,38 @@ border-bottom:1px solid #eee;
 
 <div class="header">
 <img src="https://static.vinet.co.za/logo.jpeg" class="logo">
-<strong>Vinet DMARC Security Dashboard</strong>
+<strong>Vinet DMARC Security Platform</strong>
 </div>
 
 <div class="container">
 
-<div id="alert" class="alert"></div>
+<div class="card">
+
+<h3>Add Domain</h3>
+
+<input id="domainInput" placeholder="domain.com">
+
+<button onclick="addDomain()">Add</button>
+
+</div>
 
 <div class="card">
 
-<h3>Domain Analyzer</h3>
+<h3>Monitored Domains</h3>
 
-<input id="domainInput" placeholder="example.com">
+<table id="domains"></table>
+
+</div>
+
+<div class="card">
+
+<h3>Scan Domain</h3>
+
+<input id="scanDomainInput" placeholder="domain.com">
 
 <button onclick="scanDomain()">Scan</button>
 
-<div id="domainResult"></div>
-
-</div>
-
-<div class="grid">
-
-<div class="card">
-<h3>Email Timeline</h3>
-<canvas id="timeline"></canvas>
-</div>
-
-<div class="card">
-<h3>Top Senders</h3>
-<canvas id="senders"></canvas>
-</div>
-
-<div class="card">
-<h3>Domains</h3>
-<canvas id="domains"></canvas>
-</div>
-
-<div class="card">
-<h3>Sender Reputation</h3>
-<table id="reputation"></table>
-</div>
-
-</div>
-
-<div class="card">
-
-<h3>Detail View</h3>
-
-<div id="detailTitle"></div>
-
-<table id="detailTable"></table>
-
-<button onclick="askAI()">Explain with AI</button>
-
-<div id="aiText"></div>
+<div id="scanResults"></div>
 
 </div>
 
@@ -137,250 +86,63 @@ border-bottom:1px solid #eee;
 
 <script>
 
-let currentContext=null
-
-async function scanDomain(){
-
-const domain=document.getElementById("domainInput").value
-
-const r=await fetch("/api/domain_lookup?domain="+domain)
-
-const d=await r.json()
-
-let html="<b>"+domain+"</b><br><br>"
-
-html+="SPF:<br>"+d.records.spf.join("<br>")+"<br><br>"
-html+="DKIM:<br>"+d.records.dkim.join("<br>")+"<br><br>"
-html+="DMARC:<br>"+d.records.dmarc.join("<br>")+"<br><br>"
-html+="MX:<br>"+d.records.mx.join("<br>")+"<br><br>"
-
-if(d.issues.length){
-
-html+="<b>Issues</b><br>"+d.issues.join("<br>")
-
-}
-
-domainResult.innerHTML=html
-
-}
-
-async function loadTimeline(){
-
-const r=await fetch("/api/timeline")
-
-const d=await r.json()
-
-new Chart(timeline,{
-
-type:"bar",
-
-data:{
-labels:d.map(x=>x.day),
-datasets:[{
-label:"Emails",
-data:d.map(x=>x.total),
-backgroundColor:"#e30613"
-}]
-},
-
-options:{
-onClick:(e,i)=>{
-if(!i.length) return
-loadDay(d[i[0].index].day)
-}
-}
-
-})
-
-}
-
-async function loadSenders(){
-
-const r=await fetch("/api/senders")
-
-const d=await r.json()
-
-new Chart(senders,{
-
-type:"bar",
-
-data:{
-labels:d.map(x=>x.source_ip),
-datasets:[{
-label:"Senders",
-data:d.map(x=>x.total),
-backgroundColor:"#e30613"
-}]
-},
-
-options:{
-onClick:(e,i)=>{
-if(!i.length) return
-loadIP(d[i[0].index].source_ip)
-}
-}
-
-})
-
-}
-
 async function loadDomains(){
 
-const r=await fetch("/api/domains")
+const r = await fetch("/api/domains/list")
+const d = await r.json()
 
-const d=await r.json()
-
-new Chart(domains,{
-
-type:"bar",
-
-data:{
-labels:d.map(x=>x.domain),
-datasets:[{
-label:"Domains",
-data:d.map(x=>x.total),
-backgroundColor:"#e30613"
-}]
-},
-
-options:{
-onClick:(e,i)=>{
-if(!i.length) return
-loadDomain(d[i[0].index].domain)
-}
-}
-
-})
-
-}
-
-async function loadReputation(){
-
-const r=await fetch("/api/reputation")
-
-const d=await r.json()
-
-let html="<tr><th>IP</th><th>Total</th><th>Failures</th><th>Status</th><th>Reason</th></tr>"
+let html="<tr><th>Domain</th><th>Action</th></tr>"
 
 d.forEach(x=>{
 
-let cls="good"
-
-if(x.status==="Suspicious") cls="warn"
-if(x.status==="Malicious") cls="bad"
-
-html+="<tr onclick='loadIP(\""+x.ip+"\")'>"
-html+="<td>"+x.ip+"</td>"
-html+="<td>"+x.total+"</td>"
-html+="<td>"+x.failures+"</td>"
-html+="<td class='"+cls+"'>"+x.status+"</td>"
-html+="<td>"+x.reason+"</td>"
+html+="<tr>"
+html+="<td>"+x.domain+"</td>"
+html+="<td><button onclick='removeDomain(""+x.domain+"")'>Remove</button></td>"
 html+="</tr>"
 
 })
 
-reputation.innerHTML=html
+domains.innerHTML=html
 
 }
 
-async function loadIP(ip){
+async function addDomain(){
 
-detailTitle.innerHTML="IP "+ip
+const domain=document.getElementById("domainInput").value
 
-const r=await fetch("/api/ip?ip="+ip)
-
-const d=await r.json()
-
-currentContext=d
-
-let html="<tr><th>Domain</th><th>Total</th><th>Failures</th></tr>"
-
-d.forEach(x=>{
-html+="<tr><td>"+x.domain+"</td><td>"+x.total+"</td><td>"+x.failures+"</td></tr>"
+await fetch("/api/domains/add",{
+method:"POST",
+body:JSON.stringify({domain})
 })
 
-detailTable.innerHTML=html
+loadDomains()
 
 }
 
-async function loadDomain(domain){
+async function removeDomain(domain){
 
-detailTitle.innerHTML="Domain "+domain
-
-const r=await fetch("/api/domain?domain="+domain)
-
-const d=await r.json()
-
-currentContext=d
-
-let html="<tr><th>IP</th><th>Total</th><th>Failures</th></tr>"
-
-d.forEach(x=>{
-html+="<tr><td>"+x.source_ip+"</td><td>"+x.total+"</td><td>"+x.failures+"</td></tr>"
+await fetch("/api/domains/remove",{
+method:"POST",
+body:JSON.stringify({domain})
 })
 
-detailTable.innerHTML=html
+loadDomains()
 
 }
 
-async function loadDay(day){
+async function scanDomain(){
 
-detailTitle.innerHTML="Day "+day
+const domain=document.getElementById("scanDomainInput").value
 
-const r=await fetch("/api/day?day="+day)
+const r = await fetch("/api/domain_lookup?domain="+domain)
 
-const d=await r.json()
+const d = await r.json()
 
-currentContext=d
-
-let html="<tr><th>IP</th><th>Domain</th><th>Total</th><th>Failures</th></tr>"
-
-d.forEach(x=>{
-html+="<tr><td>"+x.source_ip+"</td><td>"+x.domain+"</td><td>"+x.total+"</td><td>"+x.failures+"</td></tr>"
-})
-
-detailTable.innerHTML=html
+scanResults.innerHTML=JSON.stringify(d,null,2)
 
 }
 
-async function askAI(){
-
-const r=await fetch("/api/ai_explain",{method:"POST",body:JSON.stringify(currentContext)})
-
-const j=await r.json()
-
-aiText.innerHTML=j.text
-
-}
-
-async function checkAttack(){
-
-const r=await fetch("/api/live_attack")
-
-const d=await r.json()
-
-if(d.failures && d.failures>50){
-
-alert.style.display="block"
-
-alert.innerHTML="⚠ Possible spoof attack from "+d.source_ip+" ("+d.failures+" failures)"
-
-}
-
-}
-
-async function init(){
-
-await checkAttack()
-
-await loadTimeline()
-await loadSenders()
-await loadDomains()
-await loadReputation()
-
-}
-
-init()
+loadDomains()
 
 </script>
 
