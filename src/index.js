@@ -13,6 +13,8 @@ if (url.pathname === "/api/map") return json(await getMap(env))
 if (url.pathname === "/api/score") return json(await calculateScore(env))
 if (url.pathname === "/api/attack_timeline") return json(await getAttackTimeline(env))
 if (url.pathname === "/api/domain_scan") return json(await scanDomain("vinet.co.za"))
+if (url.pathname === "/api/live_attack") return json(await getLiveAttack(env))
+if (url.pathname === "/api/reputation") return json(await getReputation(env))
 
 return new Response(html,{headers:{ "content-type":"text/html"}})
 
@@ -166,6 +168,62 @@ return r.results
 
 }
 
+async function getLiveAttack(env){
+
+const r=await env.DB.prepare(`
+
+SELECT source_ip,
+SUM(count) failures
+FROM dmarc_records
+WHERE disposition!='none'
+GROUP BY source_ip
+ORDER BY failures DESC
+LIMIT 1
+
+`).first()
+
+return r || {}
+
+}
+
+async function getReputation(env){
+
+const rows=await env.DB.prepare(`
+
+SELECT
+source_ip,
+SUM(count) total,
+SUM(CASE WHEN disposition!='none' THEN count ELSE 0 END) failures
+FROM dmarc_records
+GROUP BY source_ip
+ORDER BY total DESC
+LIMIT 10
+
+`).all()
+
+const results=[]
+
+rows.results.forEach(r=>{
+
+let reputation="Neutral"
+
+if(r.failures===0) reputation="Trusted"
+if(r.failures>20) reputation="Suspicious"
+if(r.failures>100) reputation="Malicious"
+
+results.push({
+ip:r.source_ip,
+total:r.total,
+failures:r.failures,
+reputation
+})
+
+})
+
+return results
+
+}
+
 async function calculateScore(env){
 
 const stats=await getSummary(env)
@@ -195,15 +253,6 @@ const html = `
 <title>Vinet DMARC Security Dashboard</title>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-
-<link
-rel="stylesheet"
-href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-/>
-
-<script
-src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-></script>
 
 <style>
 
@@ -243,24 +292,38 @@ border-radius:8px;
 box-shadow:0 1px 4px rgba(0,0,0,0.08);
 }
 
-.card h3{
-font-size:14px;
-color:#666;
-margin-bottom:10px;
-}
-
 .metric{
 font-size:36px;
 font-weight:bold;
 color:#e30613;
 }
 
+table{
+width:100%;
+border-collapse:collapse;
+}
+
+td,th{
+padding:6px;
+border-bottom:1px solid #ddd;
+font-size:13px;
+}
+
+.bad{color:red;font-weight:bold}
+.warn{color:orange;font-weight:bold}
+.good{color:green;font-weight:bold}
+
 canvas{
 height:200px!important;
 }
 
-#map{
-height:260px;
+.alert{
+background:#ffe8e8;
+border-left:5px solid #e30613;
+padding:12px;
+margin-bottom:20px;
+display:none;
+font-weight:bold;
 }
 
 </style>
@@ -278,6 +341,8 @@ height:260px;
 </div>
 
 <div class="container">
+
+<div id="alert" class="alert"></div>
 
 <div class="grid">
 
@@ -322,8 +387,8 @@ height:260px;
 </div>
 
 <div class="card">
-<h3>Global Mail Sources</h3>
-<div id="map"></div>
+<h3>Sender Reputation</h3>
+<table id="reputation"></table>
 </div>
 
 </div>
@@ -335,7 +400,6 @@ height:260px;
 function animateValue(el,end){
 
 let start=0
-let duration=800
 let step=end/20
 
 function update(){
@@ -383,6 +447,48 @@ animateValue(compliance,d.compliance)
 
 }
 
+async function loadAlert(){
+
+const r=await fetch('/api/live_attack')
+const d=await r.json()
+
+if(d.failures>50){
+
+alert.style.display="block"
+
+alert.innerHTML="⚠ Active Spoof Attempt Detected — IP "+d.source_ip+" ("+d.failures+" failed emails)"
+
+}
+
+}
+
+async function loadReputation(){
+
+const r=await fetch('/api/reputation')
+const d=await r.json()
+
+let html="<tr><th>IP</th><th>Total</th><th>Failures</th><th>Status</th></tr>"
+
+d.forEach(x=>{
+
+let cls="good"
+
+if(x.reputation==="Suspicious") cls="warn"
+if(x.reputation==="Malicious") cls="bad"
+
+html+="<tr>"
+html+="<td>"+x.ip+"</td>"
+html+="<td>"+x.total+"</td>"
+html+="<td>"+x.failures+"</td>"
+html+="<td class='"+cls+"'>"+x.reputation+"</td>"
+html+="</tr>"
+
+})
+
+reputation.innerHTML=html
+
+}
+
 async function chart(endpoint,canvas,label){
 
 const r=await fetch(endpoint)
@@ -405,36 +511,16 @@ plugins:{legend:{display:false}}
 
 }
 
-async function loadMap(){
-
-const r=await fetch('/api/map')
-const d=await r.json()
-
-const map=L.map('map').setView([20,0],2)
-
-L.tileLayer(
-'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
-).addTo(map)
-
-d.forEach(p=>{
-L.circleMarker([p.lat,p.lon],{
-radius:4,
-color:"#e30613"
-}).addTo(map)
-})
-
-}
-
 loadScore()
 loadScan()
+loadAlert()
+loadReputation()
 
 chart('/api/timeline',timeline,'Emails')
 chart('/api/attack_timeline',attacks,'Spoof Attacks')
 chart('/api/providers',providers,'Providers')
 chart('/api/senders',senders,'Emails')
 chart('/api/domains',domains,'Emails')
-
-loadMap()
 
 </script>
 
