@@ -6,19 +6,14 @@ const url = new URL(request.url)
 
 if (url.pathname === "/api/summary") return json(await getSummary(env))
 if (url.pathname === "/api/timeline") return json(await getTimeline(env))
-if (url.pathname === "/api/senders") return json(await getSenders(env))
-if (url.pathname === "/api/domains") return json(await getDomains(env))
-if (url.pathname === "/api/failures") return json(await getFailures(env))
-if (url.pathname === "/api/countries") return json(await getCountries(env))
-if (url.pathname === "/api/asn") return json(await getASN(env))
-if (url.pathname === "/api/map") return json(await getMap(env))
-if (url.pathname === "/api/spoof") return json(await detectSpoof(env))
-if (url.pathname === "/api/alerts") return json(await getAlerts(env))
 if (url.pathname === "/api/providers") return json(await getProviders(env))
-if (url.pathname === "/api/reputation") return json(await getReputation(env))
+if (url.pathname === "/api/map") return json(await getMap(env))
 if (url.pathname === "/api/attack_timeline") return json(await getAttackTimeline(env))
+if (url.pathname === "/api/senders") return json(await analyzeSenders(env))
 
-return new Response(html,{headers:{ "content-type":"text/html"}})
+return new Response(html,{
+headers:{ "content-type":"text/html"}
+})
 
 }
 
@@ -53,112 +48,6 @@ return r.results
 
 }
 
-async function getSenders(env){
-
-const r = await env.DB.prepare(`SELECT source_ip, SUM(count) total
-FROM dmarc_records
-GROUP BY source_ip
-ORDER BY total DESC
-LIMIT 10`).all()
-
-return r.results
-
-}
-
-async function getDomains(env){
-
-const r = await env.DB.prepare(`SELECT domain, SUM(count) total
-FROM dmarc_records
-GROUP BY domain
-ORDER BY total DESC`).all()
-
-return r.results
-
-}
-
-async function getFailures(env){
-
-const r = await env.DB.prepare(`SELECT source_ip, spf, dkim, SUM(count) total
-FROM dmarc_records
-WHERE disposition!='none'
-GROUP BY source_ip
-ORDER BY total DESC`).all()
-
-return r.results
-
-}
-
-async function getCountries(env){
-
-const senders = await env.DB.prepare(`SELECT source_ip, SUM(count) total
-FROM dmarc_records
-GROUP BY source_ip`).all()
-
-const results=[]
-
-for(const s of senders.results){
-
-let geo = await env.DB.prepare(
-"SELECT * FROM ip_geo WHERE ip=?"
-).bind(s.source_ip).first()
-
-if(!geo){
-
-const res = await fetch("http://ip-api.com/json/"+s.source_ip)
-const data = await res.json()
-
-await env.DB.prepare(`INSERT INTO ip_geo
-(ip,country,city,org,asn,lat,lon,last_checked)
-VALUES (?,?,?,?,?,?,?,?)`)
-.bind(
-s.source_ip,
-data.country,
-data.city,
-data.org,
-data.as,
-data.lat,
-data.lon,
-Date.now()
-).run()
-
-geo=data
-
-}
-
-results.push({
-country:geo.country,
-count:s.total
-})
-
-}
-
-return results
-
-}
-
-async function getASN(env){
-
-const r = await env.DB.prepare(`SELECT org, COUNT(*) total
-FROM ip_geo
-GROUP BY org
-ORDER BY total DESC
-LIMIT 10`).all()
-
-return r.results
-
-}
-
-async function getMap(env){
-
-const r = await env.DB.prepare(`SELECT lat, lon
-FROM ip_geo
-WHERE lat IS NOT NULL
-LIMIT 200`).all()
-
-return r.results
-
-}
-
 function classifyProvider(org){
 
 if(!org) return "Unknown"
@@ -181,21 +70,22 @@ const rows = await env.DB.prepare(`SELECT org, COUNT(*) total
 FROM ip_geo
 GROUP BY org`).all()
 
-return rows.results.map(r=>{
-return {
-provider:classifyProvider(r.org),
-count:r.total
-}
+const map={}
+
+rows.results.forEach(r=>{
+const p=classifyProvider(r.org)
+map[p]=(map[p]||0)+r.total
+})
+
+return Object.keys(map).map(k=>{
+return {provider:k,total:map}
 })
 
 }
 
-async function getReputation(env){
+async function analyzeSenders(env){
 
-const rows = await env.DB.prepare(`SELECT source_ip,
-SUM(count) total,
-spf,
-dkim
+const rows = await env.DB.prepare(`SELECT source_ip, SUM(count) total
 FROM dmarc_records
 GROUP BY source_ip`).all()
 
@@ -203,14 +93,38 @@ const results=[]
 
 for(const r of rows.results){
 
-let reputation="neutral"
+let geo = await env.DB.prepare(
+"SELECT * FROM ip_geo WHERE ip=?"
+).bind(r.source_ip).first()
 
-if(r.spf==="pass" && r.dkim==="pass") reputation="trusted"
-if(r.spf!=="pass" && r.dkim!=="pass") reputation="suspicious"
+if(!geo) continue
+
+const provider = classifyProvider(geo.org)
+
+const trusted = await env.DB.prepare(
+"SELECT * FROM trusted_providers WHERE provider=?"
+).bind(provider).first()
+
+let status="unknown"
+
+if(trusted) status="trusted"
+if(!trusted && r.total>50) status="suspicious"
+
+await env.DB.prepare(`INSERT OR REPLACE INTO sender_activity
+(ip,provider,first_seen,last_seen,status)
+VALUES (?,?,?,?,?)`)
+.bind(
+r.source_ip,
+provider,
+Date.now(),
+Date.now(),
+status
+).run()
 
 results.push({
 ip:r.source_ip,
-reputation:reputation,
+provider:provider,
+status:status,
 emails:r.total
 })
 
@@ -220,50 +134,13 @@ return results
 
 }
 
-async function detectSpoof(env){
+async function getMap(env){
 
-const rows = await env.DB.prepare(`SELECT source_ip,domain,spf,dkim,SUM(count) total
-FROM dmarc_records
-WHERE disposition!='none'
-GROUP BY source_ip`).all()
+const r = await env.DB.prepare(`SELECT lat,lon FROM ip_geo
+WHERE lat IS NOT NULL
+LIMIT 200`).all()
 
-const results=[]
-
-for(const r of rows.results){
-
-let risk=0
-
-if(r.spf!=="pass") risk+=40
-if(r.dkim!=="pass") risk+=40
-if(r.total>50) risk+=20
-
-if(risk>=60){
-
-await env.DB.prepare(`INSERT INTO spoof_events
-(source_ip,domain,spf,dkim,count,risk_score,detected_at)
-VALUES (?,?,?,?,?,?,?)`)
-.bind(
-r.source_ip,
-r.domain,
-r.spf,
-r.dkim,
-r.total,
-risk,
-Date.now()
-).run()
-
-results.push({
-ip:r.source_ip,
-domain:r.domain,
-risk:risk,
-count:r.total
-})
-
-}
-
-}
-
-return results
+return r.results
 
 }
 
@@ -279,30 +156,7 @@ return r.results
 
 }
 
-async function getAlerts(env){
-
-const summary = await getSummary(env)
-
-const failureRate = summary.failures / summary.total
-
-if(failureRate > 0.2){
-
-await env.DB.prepare(`INSERT INTO alerts (type,message,created_at)
-VALUES ('dmarc','High DMARC failure rate detected',?)`)
-.bind(Date.now()).run()
-
-}
-
-const r = await env.DB.prepare(`SELECT message,created_at
-FROM alerts
-ORDER BY created_at DESC
-LIMIT 20`).all()
-
-return r.results
-
-}
-
-const html=`
+const html = `
 
 <html>
 
@@ -343,6 +197,20 @@ border-radius:12px;
 height:400px;
 border-radius:10px;
 }
+
+table{
+width:100%;
+border-collapse:collapse;
+}
+
+td,th{
+padding:8px;
+border-bottom:1px solid #333;
+}
+
+.trusted{color:#4ade80}
+.unknown{color:#facc15}
+.suspicious{color:#f87171}
 
 </style>
 
@@ -387,6 +255,13 @@ border-radius:10px;
 <div id="map"></div>
 </div>
 
+<br>
+
+<div class="card">
+<h3>Sender Reputation</h3>
+<table id="senders"></table>
+</div>
+
 <script>
 
 async function loadSummary(){
@@ -410,7 +285,7 @@ new Chart(canvas,{
 type:'bar',
 data:{
 labels:d.map(x=>x.day || x.provider),
-datasets:[{label:label,data:d.map(x=>x.total || x.attacks || x.count)}]
+datasets:[{label:label,data:d.map(x=>x.total || x.attacks)}]
 }
 })
 
@@ -433,6 +308,26 @@ L.marker([p.lat,p.lon]).addTo(map)
 
 }
 
+async function loadSenders(){
+
+const r=await fetch('/api/senders')
+const d=await r.json()
+
+let html="<tr><th>IP</th><th>Provider</th><th>Status</th><th>Emails</th></tr>"
+
+d.forEach(s=>{
+html+="<tr>"
+html+="<td>"+s.ip+"</td>"
+html+="<td>"+s.provider+"</td>"
+html+="<td class='"+s.status+"'>"+s.status+"</td>"
+html+="<td>"+s.emails+"</td>"
+html+="</tr>"
+})
+
+senders.innerHTML=html
+
+}
+
 loadSummary()
 
 chart('/api/timeline',timeline,'Emails')
@@ -440,9 +335,11 @@ chart('/api/attack_timeline',attacks,'Spoof Attacks')
 chart('/api/providers',providers,'Providers')
 
 loadMap()
+loadSenders()
 
 </script>
 
 </body>
 </html>
-\`
+
+`
