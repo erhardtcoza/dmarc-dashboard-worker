@@ -1,0 +1,8 @@
+name = "dmarc-dashboard"
+main = "src/index.js"
+compatibility_date = "2026-03-25"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "dmarc"
+database_id = "a361bbea-4832-4bec-a391-c77d274fee4b"
