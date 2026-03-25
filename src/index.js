@@ -4,41 +4,47 @@ async fetch(request, env) {
 
 const url = new URL(request.url)
 
-if (url.pathname === "/api/summary") return Response.json(await getSummary(env))
-if (url.pathname === "/api/timeline") return Response.json(await getTimeline(env))
-if (url.pathname === "/api/senders") return Response.json(await getSenders(env))
-if (url.pathname === "/api/domains") return Response.json(await getDomains(env))
-if (url.pathname === "/api/failures") return Response.json(await getFailures(env))
-if (url.pathname === "/api/countries") return Response.json(await getCountries(env))
-if (url.pathname === "/api/asn") return Response.json(await getASN(env))
-if (url.pathname === "/api/map") return Response.json(await getMap(env))
-if (url.pathname === "/api/spoof") return Response.json(await detectSpoof(env))
-if (url.pathname === "/api/alerts") return Response.json(await getAlerts(env))
+if (url.pathname === "/api/summary") return json(await getSummary(env))
+if (url.pathname === "/api/timeline") return json(await getTimeline(env))
+if (url.pathname === "/api/senders") return json(await getSenders(env))
+if (url.pathname === "/api/domains") return json(await getDomains(env))
+if (url.pathname === "/api/failures") return json(await getFailures(env))
+if (url.pathname === "/api/countries") return json(await getCountries(env))
+if (url.pathname === "/api/asn") return json(await getASN(env))
+if (url.pathname === "/api/map") return json(await getMap(env))
+if (url.pathname === "/api/spoof") return json(await detectSpoof(env))
+if (url.pathname === "/api/alerts") return json(await getAlerts(env))
+if (url.pathname === "/api/providers") return json(await getProviders(env))
+if (url.pathname === "/api/reputation") return json(await getReputation(env))
+if (url.pathname === "/api/attack_timeline") return json(await getAttackTimeline(env))
 
-return new Response(html,{
-headers:{ "content-type":"text/html"}
-})
+return new Response(html,{headers:{ "content-type":"text/html"}})
 
 }
 
+}
+
+function json(data){
+return new Response(JSON.stringify(data),{
+headers:{ "content-type":"application/json"}
+})
 }
 
 async function getSummary(env){
 
 return await env.DB.prepare(`SELECT
-SUM(count) as total,
-SUM(CASE WHEN spf='pass' THEN count ELSE 0 END) as spf_pass,
-SUM(CASE WHEN dkim='pass' THEN count ELSE 0 END) as dkim_pass,
-SUM(CASE WHEN disposition!='none' THEN count ELSE 0 END) as failures
+SUM(count) total,
+SUM(CASE WHEN spf='pass' THEN count ELSE 0 END) spf_pass,
+SUM(CASE WHEN dkim='pass' THEN count ELSE 0 END) dkim_pass,
+SUM(CASE WHEN disposition!='none' THEN count ELSE 0 END) failures
 FROM dmarc_records`).first()
 
 }
 
 async function getTimeline(env){
 
-const r = await env.DB.prepare(`SELECT
-date(created_at/1000,'unixepoch') as day,
-SUM(count) as total
+const r = await env.DB.prepare(`SELECT date(created_at/1000,'unixepoch') day,
+SUM(count) total
 FROM dmarc_records
 GROUP BY day
 ORDER BY day`).all()
@@ -49,7 +55,7 @@ return r.results
 
 async function getSenders(env){
 
-const r = await env.DB.prepare(`SELECT source_ip, SUM(count) as total
+const r = await env.DB.prepare(`SELECT source_ip, SUM(count) total
 FROM dmarc_records
 GROUP BY source_ip
 ORDER BY total DESC
@@ -61,7 +67,7 @@ return r.results
 
 async function getDomains(env){
 
-const r = await env.DB.prepare(`SELECT domain, SUM(count) as total
+const r = await env.DB.prepare(`SELECT domain, SUM(count) total
 FROM dmarc_records
 GROUP BY domain
 ORDER BY total DESC`).all()
@@ -72,7 +78,7 @@ return r.results
 
 async function getFailures(env){
 
-const r = await env.DB.prepare(`SELECT source_ip, spf, dkim, SUM(count) as total
+const r = await env.DB.prepare(`SELECT source_ip, spf, dkim, SUM(count) total
 FROM dmarc_records
 WHERE disposition!='none'
 GROUP BY source_ip
@@ -84,7 +90,7 @@ return r.results
 
 async function getCountries(env){
 
-const senders = await env.DB.prepare(`SELECT source_ip, SUM(count) as total
+const senders = await env.DB.prepare(`SELECT source_ip, SUM(count) total
 FROM dmarc_records
 GROUP BY source_ip`).all()
 
@@ -93,15 +99,16 @@ const results=[]
 for(const s of senders.results){
 
 let geo = await env.DB.prepare(
-`SELECT * FROM ip_geo WHERE ip=?`
+"SELECT * FROM ip_geo WHERE ip=?"
 ).bind(s.source_ip).first()
 
 if(!geo){
 
-const res = await fetch(`http://ip-api.com/json/${s.source_ip}`)
+const res = await fetch("http://ip-api.com/json/"+s.source_ip)
 const data = await res.json()
 
-await env.DB.prepare(`INSERT INTO ip_geo (ip,country,city,org,asn,lat,lon,last_checked)
+await env.DB.prepare(`INSERT INTO ip_geo
+(ip,country,city,org,asn,lat,lon,last_checked)
 VALUES (?,?,?,?,?,?,?,?)`)
 .bind(
 s.source_ip,
@@ -131,7 +138,7 @@ return results
 
 async function getASN(env){
 
-const r = await env.DB.prepare(`SELECT org, COUNT(*) as total
+const r = await env.DB.prepare(`SELECT org, COUNT(*) total
 FROM ip_geo
 GROUP BY org
 ORDER BY total DESC
@@ -152,35 +159,88 @@ return r.results
 
 }
 
-async function detectSpoof(env){
+function classifyProvider(org){
 
-const records = await env.DB.prepare(`SELECT source_ip, domain, spf, dkim, SUM(count) as total
+if(!org) return "Unknown"
+
+org=org.toLowerCase()
+
+if(org.includes("google")) return "Google"
+if(org.includes("microsoft")) return "Microsoft"
+if(org.includes("amazon")) return "Amazon SES"
+if(org.includes("sendgrid")) return "Sendgrid"
+if(org.includes("mailgun")) return "Mailgun"
+
+return "Other"
+
+}
+
+async function getProviders(env){
+
+const rows = await env.DB.prepare(`SELECT org, COUNT(*) total
+FROM ip_geo
+GROUP BY org`).all()
+
+return rows.results.map(r=>{
+return {
+provider:classifyProvider(r.org),
+count:r.total
+}
+})
+
+}
+
+async function getReputation(env){
+
+const rows = await env.DB.prepare(`SELECT source_ip,
+SUM(count) total,
+spf,
+dkim
 FROM dmarc_records
-WHERE disposition!='none'
-GROUP BY source_ip
-ORDER BY total DESC`).all()
+GROUP BY source_ip`).all()
 
 const results=[]
 
-for(const r of records.results){
+for(const r of rows.results){
+
+let reputation="neutral"
+
+if(r.spf==="pass" && r.dkim==="pass") reputation="trusted"
+if(r.spf!=="pass" && r.dkim!=="pass") reputation="suspicious"
+
+results.push({
+ip:r.source_ip,
+reputation:reputation,
+emails:r.total
+})
+
+}
+
+return results
+
+}
+
+async function detectSpoof(env){
+
+const rows = await env.DB.prepare(`SELECT source_ip,domain,spf,dkim,SUM(count) total
+FROM dmarc_records
+WHERE disposition!='none'
+GROUP BY source_ip`).all()
+
+const results=[]
+
+for(const r of rows.results){
 
 let risk=0
 
-if(r.spf !== 'pass') risk+=40
-if(r.dkim !== 'pass') risk+=40
-if(r.total > 50) risk+=20
+if(r.spf!=="pass") risk+=40
+if(r.dkim!=="pass") risk+=40
+if(r.total>50) risk+=20
 
-if(risk >= 60){
+if(risk>=60){
 
-await env.DB.prepare(`INSERT INTO spoof_events (
-source_ip,
-domain,
-spf,
-dkim,
-count,
-risk_score,
-detected_at
-)
+await env.DB.prepare(`INSERT INTO spoof_events
+(source_ip,domain,spf,dkim,count,risk_score,detected_at)
 VALUES (?,?,?,?,?,?,?)`)
 .bind(
 r.source_ip,
@@ -207,6 +267,18 @@ return results
 
 }
 
+async function getAttackTimeline(env){
+
+const r = await env.DB.prepare(`SELECT date(detected_at/1000,'unixepoch') day,
+COUNT(*) attacks
+FROM spoof_events
+GROUP BY day
+ORDER BY day`).all()
+
+return r.results
+
+}
+
 async function getAlerts(env){
 
 const summary = await getSummary(env)
@@ -221,7 +293,8 @@ VALUES ('dmarc','High DMARC failure rate detected',?)`)
 
 }
 
-const r = await env.DB.prepare(`SELECT * FROM alerts
+const r = await env.DB.prepare(`SELECT message,created_at
+FROM alerts
 ORDER BY created_at DESC
 LIMIT 20`).all()
 
@@ -229,7 +302,7 @@ return r.results
 
 }
 
-const html = `
+const html=`
 
 <html>
 
@@ -266,25 +339,9 @@ padding:20px;
 border-radius:12px;
 }
 
-canvas{
-background:white;
-border-radius:8px;
-padding:10px;
-}
-
 #map{
 height:400px;
 border-radius:10px;
-}
-
-table{
-width:100%;
-border-collapse:collapse;
-}
-
-td,th{
-padding:8px;
-border-bottom:1px solid #333;
 }
 
 </style>
@@ -297,7 +354,7 @@ border-bottom:1px solid #333;
 
 <div class="grid">
 
-<div class="card"><h3>Total Emails</h3><div id="total"></div></div>
+<div class="card"><h3>Total</h3><div id="total"></div></div>
 <div class="card"><h3>SPF Pass</h3><div id="spf"></div></div>
 <div class="card"><h3>DKIM Pass</h3><div id="dkim"></div></div>
 <div class="card"><h3>Failures</h3><div id="fail"></div></div>
@@ -312,36 +369,22 @@ border-bottom:1px solid #333;
 <br>
 
 <div class="card">
-<h3>Top Senders</h3>
-<canvas id="senders"></canvas>
+<h3>Spoof Attack Timeline</h3>
+<canvas id="attacks"></canvas>
 </div>
 
 <br>
 
 <div class="card">
-<h3>Sender Organizations</h3>
-<canvas id="asn"></canvas>
+<h3>Sender Providers</h3>
+<canvas id="providers"></canvas>
 </div>
 
 <br>
 
 <div class="card">
-<h3>Global Email Sources</h3>
+<h3>Global Sources</h3>
 <div id="map"></div>
-</div>
-
-<br>
-
-<div class="card">
-<h3>Spoof Detection</h3>
-<table id="spoofTable"></table>
-</div>
-
-<br>
-
-<div class="card">
-<h3>Security Alerts</h3>
-<ul id="alerts"></ul>
 </div>
 
 <script>
@@ -358,46 +401,16 @@ fail.innerHTML=d.failures
 
 }
 
-async function loadTimeline(){
+async function chart(endpoint,canvas,label){
 
-const r = await fetch('/api/timeline')
-const d = await r.json()
+const r=await fetch(endpoint)
+const d=await r.json()
 
-new Chart(timeline,{
-type:'line',
-data:{
-labels:d.map(x=>x.day),
-datasets:[{label:'Emails',data:d.map(x=>x.total)}]
-}
-})
-
-}
-
-async function loadSenders(){
-
-const r = await fetch('/api/senders')
-const d = await r.json()
-
-new Chart(senders,{
+new Chart(canvas,{
 type:'bar',
 data:{
-labels:d.map(x=>x.source_ip),
-datasets:[{label:'Emails',data:d.map(x=>x.total)}]
-}
-})
-
-}
-
-async function loadASN(){
-
-const r = await fetch('/api/asn')
-const d = await r.json()
-
-new Chart(asn,{
-type:'pie',
-data:{
-labels:d.map(x=>x.org),
-datasets:[{data:d.map(x=>x.total)}]
+labels:d.map(x=>x.day || x.provider),
+datasets:[{label:label,data:d.map(x=>x.total || x.attacks || x.count)}]
 }
 })
 
@@ -405,10 +418,10 @@ datasets:[{data:d.map(x=>x.total)}]
 
 async function loadMap(){
 
-const r = await fetch('/api/map')
-const d = await r.json()
+const r=await fetch('/api/map')
+const d=await r.json()
 
-const map = L.map('map').setView([20,0],2)
+const map=L.map('map').setView([20,0],2)
 
 L.tileLayer(
 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
@@ -420,45 +433,16 @@ L.marker([p.lat,p.lon]).addTo(map)
 
 }
 
-async function loadSpoof(){
-
-const r = await fetch('/api/spoof')
-const d = await r.json()
-
-let html="<tr><th>IP</th><th>Domain</th><th>Risk</th><th>Emails</th></tr>"
-
-d.forEach(x=>{
-html+="<tr><td>"+x.ip+"</td><td>"+x.domain+"</td><td>"+x.risk+"</td><td>"+x.count+"</td></tr>"
-})
-
-spoofTable.innerHTML=html
-
-}
-
-async function loadAlerts(){
-
-const r = await fetch('/api/alerts')
-const d = await r.json()
-
-alerts.innerHTML=""
-
-d.forEach(a=>{
-alerts.innerHTML+="<li>"+a.message+"</li>"
-})
-
-}
-
 loadSummary()
-loadTimeline()
-loadSenders()
-loadASN()
+
+chart('/api/timeline',timeline,'Emails')
+chart('/api/attack_timeline',attacks,'Spoof Attacks')
+chart('/api/providers',providers,'Providers')
+
 loadMap()
-loadSpoof()
-loadAlerts()
 
 </script>
 
 </body>
 </html>
-
-`
+\`
