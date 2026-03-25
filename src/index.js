@@ -4,26 +4,14 @@ async fetch(request, env) {
 
 const url = new URL(request.url)
 
-if (url.pathname === "/api/summary") return json(await getSummary(env))
-if (url.pathname === "/api/timeline") return json(await getTimeline(env))
-if (url.pathname === "/api/providers") return json(await getProviders(env))
-if (url.pathname === "/api/senders") return json(await getSenders(env))
-if (url.pathname === "/api/domains") return json(await getDomains(env))
-if (url.pathname === "/api/map") return json(await getMap(env))
-if (url.pathname === "/api/score") return json(await calculateScore(env))
-if (url.pathname === "/api/attack_timeline") return json(await getAttackTimeline(env))
-if (url.pathname === "/api/domain_scan") return json(await scanDomain("vinet.co.za"))
-if (url.pathname === "/api/live_attack") return json(await getLiveAttack(env))
-if (url.pathname === "/api/reputation") return json(await getReputation(env))
-
 if (url.pathname === "/api/domain_lookup") {
 const domain = url.searchParams.get("domain")
-return json(await lookupDomain(domain))
+return json(await lookupDomain(env,domain))
 }
 
 if (url.pathname === "/api/bulk_lookup") {
 const domains = url.searchParams.get("domains").split(",")
-return json(await bulkLookup(domains))
+return json(await bulkLookup(env,domains))
 }
 
 return new Response(html,{headers:{ "content-type":"text/html"}})
@@ -50,7 +38,45 @@ return data.Answer || []
 
 }
 
-async function lookupDomain(domain){
+async function aiAdvice(env,data){
+
+if(!env.OPENAI_API_KEY) return "AI advice unavailable"
+
+const r = await fetch("https://api.openai.com/v1/chat/completions",{
+
+method:"POST",
+
+headers:{
+"Authorization":"Bearer "+env.OPENAI_API_KEY,
+"Content-Type":"application/json"
+},
+
+body:JSON.stringify({
+
+model:"gpt-4o-mini",
+
+messages:[
+{
+role:"system",
+content:"You are an email security expert. Analyze SPF, DKIM, DMARC, MX and BIMI records and recommend improvements."
+},
+{
+role:"user",
+content:JSON.stringify(data)
+}
+]
+
+})
+
+})
+
+const j = await r.json()
+
+return j.choices?.[0]?.message?.content || "No advice generated"
+
+}
+
+async function lookupDomain(env,domain){
 
 if(!domain) return {}
 
@@ -91,13 +117,22 @@ break
 
 }
 
-let advice=[]
+let issues=[]
 
-if(spfStatus==="missing") advice.push("Missing SPF record")
-if(dmarcStatus==="none") advice.push("DMARC policy set to none")
-if(dkimStatus==="missing") advice.push("DKIM not detected")
-if(mxStatus==="missing") advice.push("No MX records configured")
-if(bimiStatus==="missing") advice.push("BIMI not configured")
+if(spfStatus==="missing") issues.push("SPF record missing")
+if(dmarcStatus==="none") issues.push("DMARC policy not enforced")
+if(dkimStatus==="missing") issues.push("DKIM not detected")
+if(mxStatus==="missing") issues.push("No MX records found")
+if(bimiStatus==="missing") issues.push("BIMI not configured")
+
+const ai = await aiAdvice(env,{
+domain,
+spf:spfStatus,
+dkim:dkimStatus,
+dmarc:dmarcStatus,
+mx:mxStatus,
+bimi:bimiStatus
+})
 
 return {
 domain,
@@ -106,19 +141,19 @@ dkim:dkimStatus,
 dmarc:dmarcStatus,
 mx:mxStatus,
 bimi:bimiStatus,
-issues:advice.length,
-advice
+issues,
+ai
 }
 
 }
 
-async function bulkLookup(domains){
+async function bulkLookup(env,domains){
 
 const results=[]
 
 for(const d of domains){
 
-const r=await lookupDomain(d.trim())
+const r=await lookupDomain(env,d.trim())
 
 results.push(r)
 
@@ -128,161 +163,13 @@ return results
 
 }
 
-async function getSummary(env){
-
-return await env.DB.prepare(`SELECT
-SUM(count) total,
-SUM(CASE WHEN spf='pass' THEN count ELSE 0 END) spf_pass,
-SUM(CASE WHEN dkim='pass' THEN count ELSE 0 END) dkim_pass,
-SUM(CASE WHEN disposition!='none' THEN count ELSE 0 END) failures
-FROM dmarc_records`).first()
-
-}
-
-async function getTimeline(env){
-
-const r=await env.DB.prepare(`SELECT date(created_at/1000,'unixepoch') day,
-SUM(count) total
-FROM dmarc_records
-GROUP BY day
-ORDER BY day`).all()
-
-return r.results
-
-}
-
-async function getSenders(env){
-
-const r=await env.DB.prepare(`SELECT source_ip, SUM(count) total
-FROM dmarc_records
-GROUP BY source_ip
-ORDER BY total DESC
-LIMIT 10`).all()
-
-return r.results
-
-}
-
-async function getDomains(env){
-
-const r=await env.DB.prepare(`SELECT domain, SUM(count) total
-FROM dmarc_records
-GROUP BY domain
-ORDER BY total DESC`).all()
-
-return r.results
-
-}
-
-async function getProviders(env){
-
-const r=await env.DB.prepare(`SELECT org, COUNT(*) total
-FROM ip_geo
-GROUP BY org`).all()
-
-return r.results
-
-}
-
-async function getMap(env){
-
-const r=await env.DB.prepare(`SELECT lat,lon
-FROM ip_geo
-WHERE lat IS NOT NULL
-LIMIT 200`).all()
-
-return r.results
-
-}
-
-async function getAttackTimeline(env){
-
-const r=await env.DB.prepare(`SELECT date(detected_at/1000,'unixepoch') day,
-COUNT(*) attacks
-FROM spoof_events
-GROUP BY day`).all()
-
-return r.results
-
-}
-
-async function getLiveAttack(env){
-
-const r=await env.DB.prepare(`SELECT source_ip,
-SUM(count) failures
-FROM dmarc_records
-WHERE disposition!='none'
-GROUP BY source_ip
-ORDER BY failures DESC
-LIMIT 1`).first()
-
-return r || {}
-
-}
-
-async function getReputation(env){
-
-const rows=await env.DB.prepare(`SELECT
-source_ip,
-SUM(count) total,
-SUM(CASE WHEN disposition!='none' THEN count ELSE 0 END) failures
-FROM dmarc_records
-GROUP BY source_ip
-ORDER BY total DESC
-LIMIT 10`).all()
-
-const results=[]
-
-rows.results.forEach(r=>{
-
-let reputation="Neutral"
-
-if(r.failures===0) reputation="Trusted"
-if(r.failures>20) reputation="Suspicious"
-if(r.failures>100) reputation="Malicious"
-
-results.push({
-ip:r.source_ip,
-total:r.total,
-failures:r.failures,
-reputation
-})
-
-})
-
-return results
-
-}
-
-async function calculateScore(env){
-
-const stats=await getSummary(env)
-
-if(!stats.total) return {score:0}
-
-const spfRate=stats.spf_pass/stats.total
-const dkimRate=stats.dkim_pass/stats.total
-const failureRate=stats.failures/stats.total
-
-let score=100
-
-score -= (1-spfRate)*30
-score -= (1-dkimRate)*30
-score -= failureRate*40
-
-return {score:Math.round(score)}
-
-}
-
 const html = `
 
 <html>
 
 <head>
 
-<title>Vinet DMARC Security Dashboard</title>
-
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<title>Vinet Email Security Dashboard</title>
 
 <style>
 
@@ -304,49 +191,62 @@ gap:15px;
 .logo{height:36px}
 
 .container{
-max-width:1600px;
+max-width:1400px;
 margin:auto;
-padding:25px;
-}
-
-.grid{
-display:grid;
-grid-template-columns:repeat(3,1fr);
-gap:20px;
+padding:30px;
 }
 
 .card{
 background:white;
 padding:20px;
 border-radius:8px;
-box-shadow:0 1px 4px rgba(0,0,0,0.08);
+box-shadow:0 2px 6px rgba(0,0,0,0.08);
+margin-bottom:20px;
 }
 
-.metric{
-font-size:36px;
-font-weight:bold;
-color:#e30613;
+input{
+padding:8px;
+width:300px;
+}
+
+button{
+padding:8px 14px;
+margin-left:6px;
+background:#e30613;
+color:white;
+border:none;
+border-radius:4px;
+cursor:pointer;
 }
 
 textarea{
 width:100%;
 height:80px;
+margin-top:10px;
 }
 
 table{
 width:100%;
 border-collapse:collapse;
 font-size:13px;
+margin-top:15px;
 }
 
 td,th{
-padding:6px;
-border-bottom:1px solid #ddd;
+padding:8px;
+border-bottom:1px solid #eee;
 }
 
 .bad{color:red;font-weight:bold}
 .warn{color:orange;font-weight:bold}
 .good{color:green;font-weight:bold}
+
+.ai{
+background:#f9fafb;
+padding:12px;
+border-left:4px solid #e30613;
+margin-top:10px;
+}
 
 </style>
 
@@ -358,7 +258,7 @@ border-bottom:1px solid #ddd;
 
 <img src="https://static.vinet.co.za/logo.jpeg" class="logo">
 
-<strong>Vinet DMARC Security Dashboard</strong>
+<strong>Vinet Email Security Dashboard</strong>
 
 </div>
 
@@ -369,6 +269,7 @@ border-bottom:1px solid #ddd;
 <h3>Domain Analyzer</h3>
 
 <input id="domainInput" placeholder="example.com">
+
 <button onclick="scanDomain()">Scan</button>
 
 <br><br>
@@ -378,40 +279,6 @@ border-bottom:1px solid #ddd;
 <button onclick="bulkScan()">Bulk Scan</button>
 
 <div id="domainResult"></div>
-
-</div>
-
-<div class="grid">
-
-<div class="card">
-<h3>Security Score</h3>
-<div id="score" class="metric"></div>
-</div>
-
-<div class="card">
-<h3>DMARC Compliance</h3>
-<div id="compliance" class="metric"></div>
-</div>
-
-<div class="card">
-<h3>Email Authentication</h3>
-<ul id="scan"></ul>
-</div>
-
-<div class="card">
-<h3>Top Senders</h3>
-<canvas id="senders"></canvas>
-</div>
-
-<div class="card">
-<h3>Domains</h3>
-<canvas id="domains"></canvas>
-</div>
-
-<div class="card">
-<h3>Sender Reputation</h3>
-<table id="reputation"></table>
-</div>
 
 </div>
 
@@ -458,12 +325,22 @@ html+="<td>"+d.dkim+"</td>"
 html+="<td>"+d.dmarc+"</td>"
 html+="<td>"+d.mx+"</td>"
 html+="<td>"+d.bimi+"</td>"
-html+="<td>"+d.issues+"</td>"
+html+="<td>"+d.issues.length+"</td>"
 html+="</tr>"
 
 })
 
 html+="</table>"
+
+data.forEach(d=>{
+
+if(d.ai){
+
+html+="<div class='ai'><b>"+d.domain+" AI Advice</b><br>"+d.ai+"</div>"
+
+}
+
+})
 
 domainResult.innerHTML=html
 
