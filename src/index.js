@@ -9,7 +9,6 @@ if (url.pathname === "/api/timeline") return json(await getTimeline(env))
 if (url.pathname === "/api/providers") return json(await getProviders(env))
 if (url.pathname === "/api/senders") return json(await getSenders(env))
 if (url.pathname === "/api/domains") return json(await getDomains(env))
-if (url.pathname === "/api/failures") return json(await getFailures(env))
 if (url.pathname === "/api/map") return json(await getMap(env))
 if (url.pathname === "/api/score") return json(await calculateScore(env))
 if (url.pathname === "/api/anomalies") return json(await detectAnomalies(env))
@@ -30,68 +29,45 @@ headers:{ "content-type":"application/json"}
 }
 
 async function getSummary(env){
-
 return await env.DB.prepare(`SELECT
 SUM(count) total,
 SUM(CASE WHEN spf='pass' THEN count ELSE 0 END) spf_pass,
 SUM(CASE WHEN dkim='pass' THEN count ELSE 0 END) dkim_pass,
 SUM(CASE WHEN disposition!='none' THEN count ELSE 0 END) failures
 FROM dmarc_records`).first()
-
 }
 
 async function getTimeline(env){
-
 const r = await env.DB.prepare(`SELECT date(created_at/1000,'unixepoch') day,
 SUM(count) total
 FROM dmarc_records
 GROUP BY day
 ORDER BY day`).all()
-
 return r.results
-
 }
 
 async function getSenders(env){
-
 const r = await env.DB.prepare(`SELECT source_ip, SUM(count) total
 FROM dmarc_records
 GROUP BY source_ip
 ORDER BY total DESC
 LIMIT 10`).all()
-
 return r.results
-
 }
 
 async function getDomains(env){
-
 const r = await env.DB.prepare(`SELECT domain, SUM(count) total
 FROM dmarc_records
 GROUP BY domain
 ORDER BY total DESC`).all()
-
 return r.results
-
-}
-
-async function getFailures(env){
-
-const r = await env.DB.prepare(`SELECT source_ip, spf, dkim, SUM(count) total
-FROM dmarc_records
-WHERE disposition!='none'
-GROUP BY source_ip
-ORDER BY total DESC`).all()
-
-return r.results
-
 }
 
 function classifyProvider(org){
 
 if(!org) return "Unknown"
 
-org = org.toLowerCase()
+org=org.toLowerCase()
 
 if(org.includes("google")) return "Google"
 if(org.includes("microsoft")) return "Microsoft"
@@ -123,25 +99,19 @@ return {provider:k,total:map}
 }
 
 async function getMap(env){
-
 const r = await env.DB.prepare(`SELECT lat,lon FROM ip_geo
 WHERE lat IS NOT NULL
 LIMIT 200`).all()
-
 return r.results
-
 }
 
 async function getAttackTimeline(env){
-
 const r = await env.DB.prepare(`SELECT date(detected_at/1000,'unixepoch') day,
 COUNT(*) attacks
 FROM spoof_events
 GROUP BY day
 ORDER BY day`).all()
-
 return r.results
-
 }
 
 async function calculateScore(env){
@@ -185,8 +155,7 @@ const anomalies=[]
 if(recent.total > historical.avg*2){
 
 anomalies.push({
-type:"traffic_spike",
-message:"Unusual email traffic spike detected"
+message:"Email traffic spike detected"
 })
 
 }
@@ -201,7 +170,7 @@ const html = `
 
 <head>
 
-<title>DMARC Security Platform</title>
+<title>Vinet DMARC Security Dashboard</title>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
@@ -216,41 +185,55 @@ body{
 background:#0f172a;
 color:white;
 font-family:system-ui;
-margin:40px;
+margin:0;
+}
+
+.nav{
+
+display:flex;
+align-items:center;
+gap:20px;
+background:#0b0b0b;
+padding:15px 30px;
+border-bottom:3px solid #e30613;
+
+}
+
+.logo{
+height:40px;
+}
+
+.container{
+padding:30px;
+}
+
+.grid{
+display:grid;
+grid-template-columns:repeat(3,1fr);
+gap:20px;
 }
 
 .card{
 background:#1e293b;
 padding:20px;
-border-radius:12px;
-margin-bottom:20px;
+border-radius:10px;
 }
 
-.grid{
-display:grid;
-grid-template-columns:repeat(4,1fr);
-gap:20px;
-margin-bottom:20px;
+.score{
+font-size:50px;
+color:#e30613;
+font-weight:bold;
+}
+
+canvas{
+background:white;
+border-radius:10px;
+padding:10px;
 }
 
 #map{
 height:400px;
 border-radius:10px;
-}
-
-table{
-width:100%;
-border-collapse:collapse;
-}
-
-td,th{
-padding:8px;
-border-bottom:1px solid #333;
-}
-
-.score{
-font-size:48px;
-font-weight:bold;
 }
 
 </style>
@@ -259,61 +242,54 @@ font-weight:bold;
 
 <body>
 
-<h1>DMARC Security Platform</h1>
+<div class="nav">
+
+<img src="https://static.vinet.co.za/logo.jpeg" class="logo">
+
+<h2>Vinet DMARC Security Dashboard</h2>
+
+</div>
+
+<div class="container">
+
+<div class="grid">
 
 <div class="card">
-
-<h2>Domain Security Score</h2>
+<h3>Domain Security Score</h3>
 <div id="score" class="score"></div>
-
 </div>
 
 <div class="card">
-
-<h2>Anomalies</h2>
-<ul id="anomalies"></ul>
-
-</div>
-
-<div class="card">
-
-<h2>Email Timeline</h2>
+<h3>Email Timeline</h3>
 <canvas id="timeline"></canvas>
-
 </div>
 
 <div class="card">
-
-<h2>Spoof Attack Timeline</h2>
+<h3>Spoof Attacks</h3>
 <canvas id="attacks"></canvas>
-
 </div>
 
 <div class="card">
-
-<h2>Providers</h2>
+<h3>Providers</h3>
 <canvas id="providers"></canvas>
-
 </div>
 
 <div class="card">
-
-<h2>Top Sending IPs</h2>
+<h3>Top Senders</h3>
 <canvas id="senders"></canvas>
-
 </div>
 
 <div class="card">
-
-<h2>Domains</h2>
+<h3>Domains</h3>
 <canvas id="domains"></canvas>
-
 </div>
 
 <div class="card">
-
-<h2>Global Sources</h2>
+<h3>Global Mail Sources</h3>
 <div id="map"></div>
+</div>
+
+</div>
 
 </div>
 
@@ -328,20 +304,7 @@ score.innerHTML=d.score
 
 }
 
-async function loadAnomalies(){
-
-const r = await fetch('/api/anomalies')
-const d = await r.json()
-
-anomalies.innerHTML=""
-
-d.forEach(a=>{
-anomalies.innerHTML+="<li>"+a.message+"</li>"
-})
-
-}
-
-async function chart(endpoint,canvas,label,key){
+async function chart(endpoint,canvas,label){
 
 const r = await fetch(endpoint)
 const d = await r.json()
@@ -377,7 +340,6 @@ L.marker([p.lat,p.lon]).addTo(map)
 }
 
 loadScore()
-loadAnomalies()
 
 chart('/api/timeline',timeline,'Emails')
 chart('/api/attack_timeline',attacks,'Spoof Attacks')
