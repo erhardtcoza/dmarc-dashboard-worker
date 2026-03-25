@@ -54,6 +54,8 @@ let spf="missing"
 let dmarc="missing"
 let bimi="missing"
 let mx="missing"
+let dkim="missing"
+let selector=""
 
 spfRecords.forEach(r=>{
 if(r.data.includes("v=spf1")) spf="valid"
@@ -68,12 +70,47 @@ else dmarc="none"
 if(bimiRecords.length>0) bimi="detected"
 if(mxRecords.length>0) mx="valid"
 
+const selectors=[
+"selector1",
+"selector2",
+"default",
+"google",
+"k1",
+"mail",
+"smtp"
+]
+
+for(const s of selectors){
+
+const result = await dnsQuery(
+s+"._domainkey."+domain,
+"TXT"
+)
+
+if(result.length>0){
+dkim="detected"
+selector=s
+break
+}
+
+}
+
+let compliance=0
+
+if(spf==="valid") compliance+=25
+if(dkim==="detected") compliance+=25
+if(dmarc==="reject") compliance+=25
+if(bimi==="detected") compliance+=25
+
 return {
-domain:domain,
-spf:spf,
-dmarc:dmarc,
-bimi:bimi,
-mx:mx
+domain,
+spf,
+dmarc,
+dkim,
+selector,
+bimi,
+mx,
+compliance
 }
 
 }
@@ -208,6 +245,11 @@ const html = `
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<link rel="stylesheet"
+href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
+
 <style>
 
 body{
@@ -248,6 +290,17 @@ font-size:50px;
 color:#e30613;
 }
 
+canvas{
+background:white;
+border-radius:10px;
+padding:10px;
+}
+
+#map{
+height:400px;
+border-radius:10px;
+}
+
 </style>
 
 </head>
@@ -276,8 +329,38 @@ color:#e30613;
 </div>
 
 <div class="card">
+<h3>DMARC Compliance</h3>
+<div id="compliance" class="score"></div>
+</div>
+
+<div class="card">
 <h3>Email Timeline</h3>
 <canvas id="timeline"></canvas>
+</div>
+
+<div class="card">
+<h3>Spoof Attack Timeline</h3>
+<canvas id="attacks"></canvas>
+</div>
+
+<div class="card">
+<h3>Providers</h3>
+<canvas id="providers"></canvas>
+</div>
+
+<div class="card">
+<h3>Top Senders</h3>
+<canvas id="senders"></canvas>
+</div>
+
+<div class="card">
+<h3>Domains</h3>
+<canvas id="domains"></canvas>
+</div>
+
+<div class="card">
+<h3>Global Mail Sources</h3>
+<div id="map"></div>
 </div>
 
 </div>
@@ -299,35 +382,61 @@ const r = await fetch('/api/domain_scan')
 const d = await r.json()
 
 scan.innerHTML=""
-
 scan.innerHTML += "<li>SPF: "+d.spf+"</li>"
 scan.innerHTML += "<li>DMARC: "+d.dmarc+"</li>"
+scan.innerHTML += "<li>DKIM: "+d.dkim+" "+(d.selector?"("+d.selector+")":"")+"</li>"
 scan.innerHTML += "<li>BIMI: "+d.bimi+"</li>"
 scan.innerHTML += "<li>MX: "+d.mx+"</li>"
 
+compliance.innerHTML=d.compliance+"%"
+
 }
 
-async function chart(){
+async function chart(endpoint,canvas,label){
 
-const r = await fetch('/api/timeline')
+const r = await fetch(endpoint)
 const d = await r.json()
 
-new Chart(timeline,{
-type:'line',
+new Chart(canvas,{
+type:'bar',
 data:{
-labels:d.map(x=>x.day),
+labels:d.map(x=>x.day || x.provider || x.source_ip || x.domain),
 datasets:[{
-label:'Emails',
-data:d.map(x=>x.total)
+label:label,
+data:d.map(x=>x.total || x.attacks)
 }]
 }
 })
 
 }
 
+async function loadMap(){
+
+const r=await fetch('/api/map')
+const d=await r.json()
+
+const map=L.map('map').setView([20,0],2)
+
+L.tileLayer(
+'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+).addTo(map)
+
+d.forEach(p=>{
+L.marker([p.lat,p.lon]).addTo(map)
+})
+
+}
+
 loadScore()
 loadScan()
-chart()
+
+chart('/api/timeline',timeline,'Emails')
+chart('/api/attack_timeline',attacks,'Spoof Attacks')
+chart('/api/providers',providers,'Providers')
+chart('/api/senders',senders,'Emails')
+chart('/api/domains',domains,'Emails')
+
+loadMap()
 
 </script>
 
