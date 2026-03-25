@@ -13,6 +13,7 @@ if (url.pathname === "/api/map") return json(await getMap(env))
 if (url.pathname === "/api/score") return json(await calculateScore(env))
 if (url.pathname === "/api/anomalies") return json(await detectAnomalies(env))
 if (url.pathname === "/api/attack_timeline") return json(await getAttackTimeline(env))
+if (url.pathname === "/api/domain_scan") return json(await scanDomain("vinet.co.za"))
 
 return new Response(html,{
 headers:{ "content-type":"text/html"}
@@ -28,54 +29,98 @@ headers:{ "content-type":"application/json"}
 })
 }
 
+async function dnsQuery(name,type){
+
+const url="https://cloudflare-dns.com/dns-query?name="+name+"&type="+type
+
+const res=await fetch(url,{
+headers:{accept:"application/dns-json"}
+})
+
+const data=await res.json()
+
+return data.Answer || []
+
+}
+
+async function scanDomain(domain){
+
+const spfRecords=await dnsQuery(domain,"TXT")
+const dmarcRecords=await dnsQuery("_dmarc."+domain,"TXT")
+const bimiRecords=await dnsQuery("default._bimi."+domain,"TXT")
+const mxRecords=await dnsQuery(domain,"MX")
+
+let spf="missing"
+let dmarc="missing"
+let bimi="missing"
+let mx="missing"
+
+spfRecords.forEach(r=>{
+if(r.data.includes("v=spf1")) spf="valid"
+})
+
+dmarcRecords.forEach(r=>{
+if(r.data.includes("p=reject")) dmarc="reject"
+else if(r.data.includes("p=quarantine")) dmarc="quarantine"
+else dmarc="none"
+})
+
+if(bimiRecords.length>0) bimi="detected"
+if(mxRecords.length>0) mx="valid"
+
+return {
+domain:domain,
+spf:spf,
+dmarc:dmarc,
+bimi:bimi,
+mx:mx
+}
+
+}
+
 async function getSummary(env){
+
 return await env.DB.prepare(`SELECT
 SUM(count) total,
 SUM(CASE WHEN spf='pass' THEN count ELSE 0 END) spf_pass,
 SUM(CASE WHEN dkim='pass' THEN count ELSE 0 END) dkim_pass,
 SUM(CASE WHEN disposition!='none' THEN count ELSE 0 END) failures
 FROM dmarc_records`).first()
+
 }
 
 async function getTimeline(env){
+
 const r = await env.DB.prepare(`SELECT date(created_at/1000,'unixepoch') day,
 SUM(count) total
 FROM dmarc_records
 GROUP BY day
 ORDER BY day`).all()
+
 return r.results
+
 }
 
 async function getSenders(env){
+
 const r = await env.DB.prepare(`SELECT source_ip, SUM(count) total
 FROM dmarc_records
 GROUP BY source_ip
 ORDER BY total DESC
 LIMIT 10`).all()
+
 return r.results
+
 }
 
 async function getDomains(env){
+
 const r = await env.DB.prepare(`SELECT domain, SUM(count) total
 FROM dmarc_records
 GROUP BY domain
 ORDER BY total DESC`).all()
+
 return r.results
-}
-
-function classifyProvider(org){
-
-if(!org) return "Unknown"
-
-org=org.toLowerCase()
-
-if(org.includes("google")) return "Google"
-if(org.includes("microsoft")) return "Microsoft"
-if(org.includes("amazon")) return "Amazon SES"
-if(org.includes("sendgrid")) return "Sendgrid"
-if(org.includes("mailgun")) return "Mailgun"
-
-return "Other"
 
 }
 
@@ -85,33 +130,30 @@ const rows = await env.DB.prepare(`SELECT org, COUNT(*) total
 FROM ip_geo
 GROUP BY org`).all()
 
-const map={}
-
-rows.results.forEach(r=>{
-const p=classifyProvider(r.org)
-map[p]=(map[p]||0)+r.total
-})
-
-return Object.keys(map).map(k=>{
-return {provider:k,total:map}
-})
+return rows.results
 
 }
 
 async function getMap(env){
+
 const r = await env.DB.prepare(`SELECT lat,lon FROM ip_geo
 WHERE lat IS NOT NULL
 LIMIT 200`).all()
+
 return r.results
+
 }
 
 async function getAttackTimeline(env){
+
 const r = await env.DB.prepare(`SELECT date(detected_at/1000,'unixepoch') day,
 COUNT(*) attacks
 FROM spoof_events
 GROUP BY day
 ORDER BY day`).all()
+
 return r.results
+
 }
 
 async function calculateScore(env){
@@ -142,20 +184,12 @@ const recent = await env.DB.prepare(`SELECT SUM(count) total
 FROM dmarc_records
 WHERE created_at > strftime('%s','now','-1 day')*1000`).first()
 
-const historical = await env.DB.prepare(`SELECT AVG(daily) avg
-FROM (
-SELECT date(created_at/1000,'unixepoch') day,
-SUM(count) daily
-FROM dmarc_records
-GROUP BY day
-)`).first()
-
 const anomalies=[]
 
-if(recent.total > historical.avg*2){
+if(recent.total>500){
 
 anomalies.push({
-message:"Email traffic spike detected"
+message:"High email traffic detected"
 })
 
 }
@@ -174,11 +208,6 @@ const html = `
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
-
-<link rel="stylesheet"
-href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
-
 <style>
 
 body{
@@ -189,51 +218,34 @@ margin:0;
 }
 
 .nav{
-
+background:#0b0b0b;
+border-bottom:3px solid #e30613;
+padding:15px 30px;
 display:flex;
 align-items:center;
 gap:20px;
-background:#0b0b0b;
-padding:15px 30px;
-border-bottom:3px solid #e30613;
-
 }
 
-.logo{
-height:40px;
-}
+.logo{height:40px}
 
-.container{
-padding:30px;
-}
-
-.grid{
-display:grid;
-grid-template-columns:repeat(3,1fr);
-gap:20px;
-}
+.container{padding:30px}
 
 .card{
 background:#1e293b;
 padding:20px;
 border-radius:10px;
+margin-bottom:20px;
+}
+
+.grid{
+display:grid;
+grid-template-columns:repeat(2,1fr);
+gap:20px;
 }
 
 .score{
 font-size:50px;
 color:#e30613;
-font-weight:bold;
-}
-
-canvas{
-background:white;
-border-radius:10px;
-padding:10px;
-}
-
-#map{
-height:400px;
-border-radius:10px;
 }
 
 </style>
@@ -243,11 +255,8 @@ border-radius:10px;
 <body>
 
 <div class="nav">
-
 <img src="https://static.vinet.co.za/logo.jpeg" class="logo">
-
 <h2>Vinet DMARC Security Dashboard</h2>
-
 </div>
 
 <div class="container">
@@ -260,35 +269,15 @@ border-radius:10px;
 </div>
 
 <div class="card">
+<h3>Email Authentication Report</h3>
+<ul id="scan"></ul>
+</div>
+
+</div>
+
+<div class="card">
 <h3>Email Timeline</h3>
 <canvas id="timeline"></canvas>
-</div>
-
-<div class="card">
-<h3>Spoof Attacks</h3>
-<canvas id="attacks"></canvas>
-</div>
-
-<div class="card">
-<h3>Providers</h3>
-<canvas id="providers"></canvas>
-</div>
-
-<div class="card">
-<h3>Top Senders</h3>
-<canvas id="senders"></canvas>
-</div>
-
-<div class="card">
-<h3>Domains</h3>
-<canvas id="domains"></canvas>
-</div>
-
-<div class="card">
-<h3>Global Mail Sources</h3>
-<div id="map"></div>
-</div>
-
 </div>
 
 </div>
@@ -304,50 +293,41 @@ score.innerHTML=d.score
 
 }
 
-async function chart(endpoint,canvas,label){
+async function loadScan(){
 
-const r = await fetch(endpoint)
+const r = await fetch('/api/domain_scan')
 const d = await r.json()
 
-new Chart(canvas,{
-type:'bar',
+scan.innerHTML=""
+
+scan.innerHTML += "<li>SPF: "+d.spf+"</li>"
+scan.innerHTML += "<li>DMARC: "+d.dmarc+"</li>"
+scan.innerHTML += "<li>BIMI: "+d.bimi+"</li>"
+scan.innerHTML += "<li>MX: "+d.mx+"</li>"
+
+}
+
+async function chart(){
+
+const r = await fetch('/api/timeline')
+const d = await r.json()
+
+new Chart(timeline,{
+type:'line',
 data:{
-labels:d.map(x=>x.day || x.provider || x.source_ip || x.domain),
+labels:d.map(x=>x.day),
 datasets:[{
-label:label,
-data:d.map(x=>x.total || x.attacks)
+label:'Emails',
+data:d.map(x=>x.total)
 }]
 }
 })
 
 }
 
-async function loadMap(){
-
-const r=await fetch('/api/map')
-const d=await r.json()
-
-const map=L.map('map').setView([20,0],2)
-
-L.tileLayer(
-'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
-).addTo(map)
-
-d.forEach(p=>{
-L.marker([p.lat,p.lon]).addTo(map)
-})
-
-}
-
 loadScore()
-
-chart('/api/timeline',timeline,'Emails')
-chart('/api/attack_timeline',attacks,'Spoof Attacks')
-chart('/api/providers',providers,'Providers')
-chart('/api/senders',senders,'Emails')
-chart('/api/domains',domains,'Emails')
-
-loadMap()
+loadScan()
+chart()
 
 </script>
 
