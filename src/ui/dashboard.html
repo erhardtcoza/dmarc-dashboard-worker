@@ -1,17 +1,77 @@
-
 <html>
+
 <head>
-<title>Vinet DMARC Dashboard</title>
+
+<title>Vinet DMARC Security Dashboard</title>
+
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
 <style>
-body{font-family:system-ui;margin:0;background:#f4f6f9}
-.header{background:white;border-bottom:3px solid #e30613;padding:15px;display:flex;gap:10px}
-.logo{height:36px}
-.container{max-width:1400px;margin:auto;padding:30px}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
-.card{background:white;padding:20px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,.08)}
+
+body{
+font-family:system-ui;
+margin:0;
+background:#f4f6f9;
+}
+
+.header{
+background:white;
+border-bottom:3px solid #e30613;
+padding:15px;
+display:flex;
+gap:10px;
+}
+
+.logo{
+height:36px;
+}
+
+.container{
+max-width:1400px;
+margin:auto;
+padding:30px;
+}
+
+.grid{
+display:grid;
+grid-template-columns:repeat(3,1fr);
+gap:20px;
+}
+
+.card{
+background:white;
+padding:20px;
+border-radius:8px;
+box-shadow:0 2px 6px rgba(0,0,0,.08);
+}
+
+.alert{
+background:#ffe8e8;
+border-left:5px solid #e30613;
+padding:10px;
+margin-bottom:20px;
+display:none;
+}
+
+table{
+width:100%;
+border-collapse:collapse;
+font-size:13px;
+}
+
+td,th{
+padding:6px;
+border-bottom:1px solid #eee;
+}
+
+.bad{color:red;font-weight:bold}
+.warn{color:orange;font-weight:bold}
+.good{color:green;font-weight:bold}
+
 </style>
+
 </head>
+
 <body>
 
 <div class="header">
@@ -20,6 +80,20 @@ body{font-family:system-ui;margin:0;background:#f4f6f9}
 </div>
 
 <div class="container">
+
+<div id="alert" class="alert"></div>
+
+<div class="card">
+
+<h3>Domain Analyzer</h3>
+
+<input id="domainInput" placeholder="example.com">
+
+<button onclick="scanDomain()">Scan</button>
+
+<div id="domainResult"></div>
+
+</div>
 
 <div class="grid">
 
@@ -38,54 +112,275 @@ body{font-family:system-ui;margin:0;background:#f4f6f9}
 <canvas id="domains"></canvas>
 </div>
 
+<div class="card">
+<h3>Sender Reputation</h3>
+<table id="reputation"></table>
+</div>
+
+</div>
+
+<div class="card">
+
+<h3>Detail View</h3>
+
+<div id="detailTitle"></div>
+
+<table id="detailTable"></table>
+
+<button onclick="askAI()">Explain with AI</button>
+
+<div id="aiText"></div>
+
 </div>
 
 </div>
 
 <script>
 
+let currentContext=null
+
+async function scanDomain(){
+
+const domain=document.getElementById("domainInput").value
+
+const r=await fetch("/api/domain_lookup?domain="+domain)
+
+const d=await r.json()
+
+let html="<b>"+domain+"</b><br><br>"
+
+html+="SPF:<br>"+d.records.spf.join("<br>")+"<br><br>"
+html+="DKIM:<br>"+d.records.dkim.join("<br>")+"<br><br>"
+html+="DMARC:<br>"+d.records.dmarc.join("<br>")+"<br><br>"
+html+="MX:<br>"+d.records.mx.join("<br>")+"<br><br>"
+
+if(d.issues.length){
+
+html+="<b>Issues</b><br>"+d.issues.join("<br>")
+
+}
+
+domainResult.innerHTML=html
+
+}
+
 async function loadTimeline(){
+
 const r=await fetch("/api/timeline")
+
 const d=await r.json()
 
 new Chart(timeline,{
+
 type:"bar",
+
 data:{
 labels:d.map(x=>x.day),
-datasets:[{label:"Emails",data:d.map(x=>x.total)}]
+datasets:[{
+label:"Emails",
+data:d.map(x=>x.total),
+backgroundColor:"#e30613"
+}]
+},
+
+options:{
+onClick:(e,i)=>{
+if(!i.length) return
+loadDay(d[i[0].index].day)
 }
+}
+
 })
+
 }
 
 async function loadSenders(){
+
 const r=await fetch("/api/senders")
+
 const d=await r.json()
 
 new Chart(senders,{
+
 type:"bar",
+
 data:{
 labels:d.map(x=>x.source_ip),
-datasets:[{label:"Emails",data:d.map(x=>x.total)}]
+datasets:[{
+label:"Senders",
+data:d.map(x=>x.total),
+backgroundColor:"#e30613"
+}]
+},
+
+options:{
+onClick:(e,i)=>{
+if(!i.length) return
+loadIP(d[i[0].index].source_ip)
 }
+}
+
 })
+
 }
 
 async function loadDomains(){
+
 const r=await fetch("/api/domains")
+
 const d=await r.json()
 
 new Chart(domains,{
+
 type:"bar",
+
 data:{
 labels:d.map(x=>x.domain),
-datasets:[{label:"Emails",data:d.map(x=>x.total)}]
+datasets:[{
+label:"Domains",
+data:d.map(x=>x.total),
+backgroundColor:"#e30613"
+}]
+},
+
+options:{
+onClick:(e,i)=>{
+if(!i.length) return
+loadDomain(d[i[0].index].domain)
 }
-})
 }
 
-loadTimeline()
-loadSenders()
-loadDomains()
+})
+
+}
+
+async function loadReputation(){
+
+const r=await fetch("/api/reputation")
+
+const d=await r.json()
+
+let html="<tr><th>IP</th><th>Total</th><th>Failures</th><th>Status</th><th>Reason</th></tr>"
+
+d.forEach(x=>{
+
+let cls="good"
+
+if(x.status==="Suspicious") cls="warn"
+if(x.status==="Malicious") cls="bad"
+
+html+="<tr onclick='loadIP(\""+x.ip+"\")'>"
+html+="<td>"+x.ip+"</td>"
+html+="<td>"+x.total+"</td>"
+html+="<td>"+x.failures+"</td>"
+html+="<td class='"+cls+"'>"+x.status+"</td>"
+html+="<td>"+x.reason+"</td>"
+html+="</tr>"
+
+})
+
+reputation.innerHTML=html
+
+}
+
+async function loadIP(ip){
+
+detailTitle.innerHTML="IP "+ip
+
+const r=await fetch("/api/ip?ip="+ip)
+
+const d=await r.json()
+
+currentContext=d
+
+let html="<tr><th>Domain</th><th>Total</th><th>Failures</th></tr>"
+
+d.forEach(x=>{
+html+="<tr><td>"+x.domain+"</td><td>"+x.total+"</td><td>"+x.failures+"</td></tr>"
+})
+
+detailTable.innerHTML=html
+
+}
+
+async function loadDomain(domain){
+
+detailTitle.innerHTML="Domain "+domain
+
+const r=await fetch("/api/domain?domain="+domain)
+
+const d=await r.json()
+
+currentContext=d
+
+let html="<tr><th>IP</th><th>Total</th><th>Failures</th></tr>"
+
+d.forEach(x=>{
+html+="<tr><td>"+x.source_ip+"</td><td>"+x.total+"</td><td>"+x.failures+"</td></tr>"
+})
+
+detailTable.innerHTML=html
+
+}
+
+async function loadDay(day){
+
+detailTitle.innerHTML="Day "+day
+
+const r=await fetch("/api/day?day="+day)
+
+const d=await r.json()
+
+currentContext=d
+
+let html="<tr><th>IP</th><th>Domain</th><th>Total</th><th>Failures</th></tr>"
+
+d.forEach(x=>{
+html+="<tr><td>"+x.source_ip+"</td><td>"+x.domain+"</td><td>"+x.total+"</td><td>"+x.failures+"</td></tr>"
+})
+
+detailTable.innerHTML=html
+
+}
+
+async function askAI(){
+
+const r=await fetch("/api/ai_explain",{method:"POST",body:JSON.stringify(currentContext)})
+
+const j=await r.json()
+
+aiText.innerHTML=j.text
+
+}
+
+async function checkAttack(){
+
+const r=await fetch("/api/live_attack")
+
+const d=await r.json()
+
+if(d.failures && d.failures>50){
+
+alert.style.display="block"
+
+alert.innerHTML="⚠ Possible spoof attack from "+d.source_ip+" ("+d.failures+" failures)"
+
+}
+
+}
+
+async function init(){
+
+await checkAttack()
+
+await loadTimeline()
+await loadSenders()
+await loadDomains()
+await loadReputation()
+
+}
+
+init()
 
 </script>
 
