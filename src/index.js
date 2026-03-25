@@ -10,6 +10,8 @@ if (url.pathname === "/api/providers") return json(await getProviders(env))
 if (url.pathname === "/api/map") return json(await getMap(env))
 if (url.pathname === "/api/attack_timeline") return json(await getAttackTimeline(env))
 if (url.pathname === "/api/senders") return json(await analyzeSenders(env))
+if (url.pathname === "/api/score") return json(await calculateScore(env))
+if (url.pathname === "/api/anomalies") return json(await detectAnomalies(env))
 
 return new Response(html,{
 headers:{ "content-type":"text/html"}
@@ -101,25 +103,10 @@ if(!geo) continue
 
 const provider = classifyProvider(geo.org)
 
-const trusted = await env.DB.prepare(
-"SELECT * FROM trusted_providers WHERE provider=?"
-).bind(provider).first()
-
 let status="unknown"
 
-if(trusted) status="trusted"
-if(!trusted && r.total>50) status="suspicious"
-
-await env.DB.prepare(`INSERT OR REPLACE INTO sender_activity
-(ip,provider,first_seen,last_seen,status)
-VALUES (?,?,?,?,?)`)
-.bind(
-r.source_ip,
-provider,
-Date.now(),
-Date.now(),
-status
-).run()
+if(provider==="Google" || provider==="Microsoft") status="trusted"
+if(r.total>50 && provider==="Other") status="suspicious"
 
 results.push({
 ip:r.source_ip,
@@ -156,7 +143,78 @@ return r.results
 
 }
 
-const html = `
+async function calculateScore(env){
+
+const stats = await getSummary(env)
+
+const spfRate = stats.spf_pass / stats.total
+const dkimRate = stats.dkim_pass / stats.total
+const failureRate = stats.failures / stats.total
+
+let score = 100
+
+score -= (1-spfRate)*30
+score -= (1-dkimRate)*30
+score -= failureRate*40
+
+score = Math.round(score)
+
+await env.DB.prepare(`INSERT OR REPLACE INTO domain_scores
+(domain,score,spf_rate,dkim_rate,failure_rate,last_calculated)
+VALUES (?,?,?,?,?,?)`)
+.bind(
+"vinet.co.za",
+score,
+spfRate,
+dkimRate,
+failureRate,
+Date.now()
+).run()
+
+return {
+domain:"vinet.co.za",
+score:score,
+spf_rate:spfRate,
+dkim_rate:dkimRate,
+failure_rate:failureRate
+}
+
+}
+
+async function detectAnomalies(env){
+
+const recent = await env.DB.prepare(`SELECT SUM(count) total
+FROM dmarc_records
+WHERE created_at > strftime('%s','now','-1 day')*1000`).first()
+
+const historical = await env.DB.prepare(`SELECT AVG(daily) avg
+FROM (
+SELECT date(created_at/1000,'unixepoch') day,
+SUM(count) daily
+FROM dmarc_records
+GROUP BY day
+)`).first()
+
+const anomalies=[]
+
+if(recent.total > historical.avg*2){
+
+await env.DB.prepare(`INSERT INTO anomalies (type,message,severity,detected_at)
+VALUES ('traffic_spike','Email traffic spike detected','medium',?)`)
+.bind(Date.now()).run()
+
+anomalies.push({
+type:"traffic_spike",
+severity:"medium"
+})
+
+}
+
+return anomalies
+
+}
+
+const html=`
 
 <html>
 
@@ -165,11 +223,6 @@ const html = `
 <title>DMARC Security Platform</title>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-
-<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
-
-<link rel="stylesheet"
-href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
 
 <style>
 
@@ -180,37 +233,21 @@ font-family:system-ui;
 margin:40px;
 }
 
-.grid{
-display:grid;
-grid-template-columns:repeat(4,1fr);
-gap:20px;
-margin-bottom:30px;
-}
-
 .card{
 background:#1e293b;
 padding:20px;
 border-radius:12px;
+margin-bottom:20px;
 }
 
-#map{
-height:400px;
-border-radius:10px;
+.score{
+font-size:48px;
+font-weight:bold;
 }
 
-table{
-width:100%;
-border-collapse:collapse;
-}
-
-td,th{
-padding:8px;
-border-bottom:1px solid #333;
-}
-
-.trusted{color:#4ade80}
-.unknown{color:#facc15}
-.suspicious{color:#f87171}
+.good{color:#4ade80}
+.medium{color:#facc15}
+.bad{color:#f87171}
 
 </style>
 
@@ -220,122 +257,52 @@ border-bottom:1px solid #333;
 
 <h1>DMARC Security Platform</h1>
 
-<div class="grid">
+<div class="card">
 
-<div class="card"><h3>Total</h3><div id="total"></div></div>
-<div class="card"><h3>SPF Pass</h3><div id="spf"></div></div>
-<div class="card"><h3>DKIM Pass</h3><div id="dkim"></div></div>
-<div class="card"><h3>Failures</h3><div id="fail"></div></div>
+<h2>Domain Security Score</h2>
+
+<div id="score" class="score"></div>
 
 </div>
 
 <div class="card">
-<h3>Email Timeline</h3>
-<canvas id="timeline"></canvas>
-</div>
 
-<br>
+<h2>Anomalies</h2>
 
-<div class="card">
-<h3>Spoof Attack Timeline</h3>
-<canvas id="attacks"></canvas>
-</div>
+<ul id="anomalies"></ul>
 
-<br>
-
-<div class="card">
-<h3>Sender Providers</h3>
-<canvas id="providers"></canvas>
-</div>
-
-<br>
-
-<div class="card">
-<h3>Global Sources</h3>
-<div id="map"></div>
-</div>
-
-<br>
-
-<div class="card">
-<h3>Sender Reputation</h3>
-<table id="senders"></table>
 </div>
 
 <script>
 
-async function loadSummary(){
+async function loadScore(){
 
-const r = await fetch('/api/summary')
+const r = await fetch('/api/score')
 const d = await r.json()
 
-total.innerHTML=d.total
-spf.innerHTML=d.spf_pass
-dkim.innerHTML=d.dkim_pass
-fail.innerHTML=d.failures
+score.innerHTML = d.score
+
+if(d.score>80) score.className="score good"
+else if(d.score>60) score.className="score medium"
+else score.className="score bad"
 
 }
 
-async function chart(endpoint,canvas,label){
+async function loadAnomalies(){
 
-const r=await fetch(endpoint)
-const d=await r.json()
+const r = await fetch('/api/anomalies')
+const d = await r.json()
 
-new Chart(canvas,{
-type:'bar',
-data:{
-labels:d.map(x=>x.day || x.provider),
-datasets:[{label:label,data:d.map(x=>x.total || x.attacks)}]
-}
+anomalies.innerHTML=""
+
+d.forEach(a=>{
+anomalies.innerHTML+="<li>"+a.type+"</li>"
 })
 
 }
 
-async function loadMap(){
-
-const r=await fetch('/api/map')
-const d=await r.json()
-
-const map=L.map('map').setView([20,0],2)
-
-L.tileLayer(
-'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
-).addTo(map)
-
-d.forEach(p=>{
-L.marker([p.lat,p.lon]).addTo(map)
-})
-
-}
-
-async function loadSenders(){
-
-const r=await fetch('/api/senders')
-const d=await r.json()
-
-let html="<tr><th>IP</th><th>Provider</th><th>Status</th><th>Emails</th></tr>"
-
-d.forEach(s=>{
-html+="<tr>"
-html+="<td>"+s.ip+"</td>"
-html+="<td>"+s.provider+"</td>"
-html+="<td class='"+s.status+"'>"+s.status+"</td>"
-html+="<td>"+s.emails+"</td>"
-html+="</tr>"
-})
-
-senders.innerHTML=html
-
-}
-
-loadSummary()
-
-chart('/api/timeline',timeline,'Emails')
-chart('/api/attack_timeline',attacks,'Spoof Attacks')
-chart('/api/providers',providers,'Providers')
-
-loadMap()
-loadSenders()
+loadScore()
+loadAnomalies()
 
 </script>
 
