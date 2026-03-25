@@ -1,3 +1,4 @@
+
 export async function dnsQuery(name,type){
 
 const r = await fetch(
@@ -6,7 +7,6 @@ const r = await fetch(
 )
 
 const j = await r.json()
-
 return j.Answer || []
 
 }
