@@ -4,33 +4,14 @@ async fetch(request, env) {
 
 const url = new URL(request.url)
 
-if (url.pathname === "/api/summary") {
-return Response.json(await getSummary(env))
-}
-
-if (url.pathname === "/api/timeline") {
-return Response.json(await getTimeline(env))
-}
-
-if (url.pathname === "/api/senders") {
-return Response.json(await getSenders(env))
-}
-
-if (url.pathname === "/api/domains") {
-return Response.json(await getDomains(env))
-}
-
-if (url.pathname === "/api/failures") {
-return Response.json(await getFailures(env))
-}
-
-if (url.pathname === "/api/countries") {
-return Response.json(await getCountries(env))
-}
-
-if (url.pathname === "/api/alerts") {
-return Response.json(await getAlerts(env))
-}
+if (url.pathname === "/api/summary") return Response.json(await getSummary(env))
+if (url.pathname === "/api/timeline") return Response.json(await getTimeline(env))
+if (url.pathname === "/api/senders") return Response.json(await getSenders(env))
+if (url.pathname === "/api/domains") return Response.json(await getDomains(env))
+if (url.pathname === "/api/failures") return Response.json(await getFailures(env))
+if (url.pathname === "/api/countries") return Response.json(await getCountries(env))
+if (url.pathname === "/api/map") return Response.json(await getMap(env))
+if (url.pathname === "/api/asn") return Response.json(await getASN(env))
 
 return new Response(html,{
 headers:{ "content-type":"text/html"}
@@ -41,93 +22,55 @@ headers:{ "content-type":"text/html"}
 }
 
 async function getSummary(env){
-
-return await env.DB.prepare(`
-
-SELECT
+return await env.DB.prepare(`SELECT
 SUM(count) as total,
 SUM(CASE WHEN spf='pass' THEN count ELSE 0 END) as spf_pass,
 SUM(CASE WHEN dkim='pass' THEN count ELSE 0 END) as dkim_pass,
 SUM(CASE WHEN disposition!='none' THEN count ELSE 0 END) as failures
-FROM dmarc_records
-
-`).first()
-
+FROM dmarc_records`).first()
 }
 
 async function getTimeline(env){
-
-const r = await env.DB.prepare(`
-
-SELECT
+const r = await env.DB.prepare(`SELECT
 date(created_at/1000,'unixepoch') as day,
 SUM(count) as total
 FROM dmarc_records
 GROUP BY day
-ORDER BY day
-
-`).all()
-
+ORDER BY day`).all()
 return r.results
-
 }
 
 async function getSenders(env){
-
-const r = await env.DB.prepare(`
-
-SELECT source_ip, SUM(count) as total
+const r = await env.DB.prepare(`SELECT source_ip, SUM(count) as total
 FROM dmarc_records
 GROUP BY source_ip
 ORDER BY total DESC
-LIMIT 10
-
-`).all()
-
+LIMIT 10`).all()
 return r.results
-
 }
 
 async function getDomains(env){
-
-const r = await env.DB.prepare(`
-
-SELECT domain, SUM(count) as total
+const r = await env.DB.prepare(`SELECT domain, SUM(count) as total
 FROM dmarc_records
 GROUP BY domain
-ORDER BY total DESC
-
-`).all()
-
+ORDER BY total DESC`).all()
 return r.results
-
 }
 
 async function getFailures(env){
-
-const r = await env.DB.prepare(`
-
-SELECT source_ip, spf, dkim, SUM(count) as total
+const r = await env.DB.prepare(`SELECT source_ip, spf, dkim, SUM(count) as total
 FROM dmarc_records
 WHERE disposition!='none'
 GROUP BY source_ip
-ORDER BY total DESC
-
-`).all()
-
+ORDER BY total DESC`).all()
 return r.results
-
 }
 
 async function getCountries(env){
 
-const senders = await env.DB.prepare(`
-
-SELECT source_ip, SUM(count) as total
+const senders = await env.DB.prepare(`SELECT source_ip, SUM(count) as total
 FROM dmarc_records
-GROUP BY source_ip
-
-`).all()
+GROUP BY source_ip`).all()
 
 const results=[]
 
@@ -142,17 +85,14 @@ if(!geo){
 const res = await fetch(`http://ip-api.com/json/${s.source_ip}`)
 const data = await res.json()
 
-await env.DB.prepare(`
-
-INSERT INTO ip_geo (ip,country,city,org,last_checked)
-VALUES (?,?,?,?,?)
-
-`)
+await env.DB.prepare(`INSERT INTO ip_geo (ip,country,city,org,asn,last_checked)
+VALUES (?,?,?,?,?,?)`)
 .bind(
 s.source_ip,
 data.country,
 data.city,
 data.org,
+data.as,
 Date.now()
 ).run()
 
@@ -161,7 +101,6 @@ geo=data
 }
 
 results.push({
-ip:s.source_ip,
 country:geo.country,
 count:s.total
 })
@@ -172,31 +111,23 @@ return results
 
 }
 
-async function getAlerts(env){
+async function getMap(env){
 
-const summary = await getSummary(env)
+const r = await env.DB.prepare(`SELECT ip,country,city
+FROM ip_geo
+LIMIT 200`).all()
 
-const failureRate = summary.failures / summary.total
-
-if(failureRate > 0.2){
-
-await env.DB.prepare(`
-
-INSERT INTO alerts (type,message,created_at)
-VALUES ('dmarc','High DMARC failure rate detected',?)
-
-`)
-.bind(Date.now()).run()
+return r.results
 
 }
 
-const r = await env.DB.prepare(`
+async function getASN(env){
 
-SELECT * FROM alerts
-ORDER BY created_at DESC
-LIMIT 20
-
-`).all()
+const r = await env.DB.prepare(`SELECT org, COUNT(*) as total
+FROM ip_geo
+GROUP BY org
+ORDER BY total DESC
+LIMIT 10`).all()
 
 return r.results
 
@@ -211,6 +142,11 @@ const html = `
 <title>DMARC Security Platform</title>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<link rel="stylesheet"
+href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
 
 <style>
 
@@ -240,14 +176,9 @@ border-radius:8px;
 padding:10px;
 }
 
-table{
-width:100%;
-border-collapse:collapse;
-}
-
-td,th{
-padding:8px;
-border-bottom:1px solid #333;
+#map{
+height:400px;
+border-radius:10px;
 }
 
 </style>
@@ -259,12 +190,10 @@ border-bottom:1px solid #333;
 <h1>DMARC Security Platform</h1>
 
 <div class="grid">
-
-<div class="card"><h3>Total Emails</h3><div id="total"></div></div>
+<div class="card"><h3>Total</h3><div id="total"></div></div>
 <div class="card"><h3>SPF Pass</h3><div id="spf"></div></div>
 <div class="card"><h3>DKIM Pass</h3><div id="dkim"></div></div>
 <div class="card"><h3>Failures</h3><div id="fail"></div></div>
-
 </div>
 
 <div class="card">
@@ -275,36 +204,22 @@ border-bottom:1px solid #333;
 <br>
 
 <div class="card">
-<h3>Top Senders</h3>
+<h3>Top Sending IPs</h3>
 <canvas id="senders"></canvas>
 </div>
 
 <br>
 
 <div class="card">
-<h3>Domains</h3>
-<canvas id="domains"></canvas>
+<h3>Sender Organizations</h3>
+<canvas id="asn"></canvas>
 </div>
 
 <br>
 
 <div class="card">
-<h3>Countries</h3>
-<canvas id="countries"></canvas>
-</div>
-
-<br>
-
-<div class="card">
-<h3>Failures</h3>
-<table id="failTable"></table>
-</div>
-
-<br>
-
-<div class="card">
-<h3>Security Alerts</h3>
-<ul id="alerts"></ul>
+<h3>Global Email Sources</h3>
+<div id="map"></div>
 </div>
 
 <script>
@@ -351,60 +266,34 @@ datasets:[{label:'Emails',data:d.map(x=>x.total)}]
 
 }
 
-async function loadDomains(){
+async function loadASN(){
 
-const r = await fetch('/api/domains')
+const r = await fetch('/api/asn')
 const d = await r.json()
 
-new Chart(domains,{
+new Chart(asn,{
 type:'pie',
 data:{
-labels:d.map(x=>x.domain),
+labels:d.map(x=>x.org),
 datasets:[{data:d.map(x=>x.total)}]
 }
 })
 
 }
 
-async function loadCountries(){
+async function loadMap(){
 
-const r = await fetch('/api/countries')
+const r = await fetch('/api/map')
 const d = await r.json()
 
-new Chart(countries,{
-type:'bar',
-data:{
-labels:d.map(x=>x.country),
-datasets:[{label:'Emails',data:d.map(x=>x.count)}]
-}
-})
+const map = L.map('map').setView([20,0],2)
 
-}
+L.tileLayer(
+'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+).addTo(map)
 
-async function loadFailures(){
-
-const r = await fetch('/api/failures')
-const d = await r.json()
-
-let html="<tr><th>IP</th><th>SPF</th><th>DKIM</th><th>Count</th></tr>"
-
-d.forEach(x=>{
-html+="<tr><td>"+x.source_ip+"</td><td>"+x.spf+"</td><td>"+x.dkim+"</td><td>"+x.total+"</td></tr>"
-})
-
-failTable.innerHTML=html
-
-}
-
-async function loadAlerts(){
-
-const r = await fetch('/api/alerts')
-const d = await r.json()
-
-alerts.innerHTML=""
-
-d.forEach(a=>{
-alerts.innerHTML+="<li>"+a.message+"</li>"
+d.forEach(p=>{
+L.marker([p.lat,p.lon]).addTo(map)
 })
 
 }
@@ -412,10 +301,8 @@ alerts.innerHTML+="<li>"+a.message+"</li>"
 loadSummary()
 loadTimeline()
 loadSenders()
-loadDomains()
-loadCountries()
-loadFailures()
-loadAlerts()
+loadASN()
+loadMap()
 
 </script>
 
