@@ -11,13 +11,10 @@ if (url.pathname === "/api/senders") return json(await getSenders(env))
 if (url.pathname === "/api/domains") return json(await getDomains(env))
 if (url.pathname === "/api/map") return json(await getMap(env))
 if (url.pathname === "/api/score") return json(await calculateScore(env))
-if (url.pathname === "/api/anomalies") return json(await detectAnomalies(env))
 if (url.pathname === "/api/attack_timeline") return json(await getAttackTimeline(env))
 if (url.pathname === "/api/domain_scan") return json(await scanDomain("vinet.co.za"))
 
-return new Response(html,{
-headers:{ "content-type":"text/html"}
-})
+return new Response(html,{headers:{ "content-type":"text/html"}})
 
 }
 
@@ -34,6 +31,7 @@ async function dnsQuery(name,type){
 const url="https://cloudflare-dns.com/dns-query?name="+name+"&type="+type
 
 const res=await fetch(url,{headers:{accept:"application/dns-json"}})
+
 const data=await res.json()
 
 return data.Answer || []
@@ -52,7 +50,6 @@ let dmarc="missing"
 let bimi="missing"
 let mx="missing"
 let dkim="missing"
-let selector=""
 
 spfRecords.forEach(r=>{
 if(r.data.includes("v=spf1")) spf="valid"
@@ -75,31 +72,29 @@ const result = await dnsQuery(s+"._domainkey."+domain,"TXT")
 
 if(result.length>0){
 dkim="detected"
-selector=s
 break
 }
 
 }
 
 let compliance=0
+
 if(spf==="valid") compliance+=25
 if(dkim==="detected") compliance+=25
 if(dmarc==="reject") compliance+=25
 if(bimi==="detected") compliance+=25
 
-return {domain,spf,dmarc,dkim,selector,bimi,mx,compliance}
+return {spf,dmarc,dkim,bimi,mx,compliance}
 
 }
 
 async function getSummary(env){
-
 return await env.DB.prepare(`SELECT
 SUM(count) total,
 SUM(CASE WHEN spf='pass' THEN count ELSE 0 END) spf_pass,
 SUM(CASE WHEN dkim='pass' THEN count ELSE 0 END) dkim_pass,
 SUM(CASE WHEN disposition!='none' THEN count ELSE 0 END) failures
 FROM dmarc_records`).first()
-
 }
 
 async function getTimeline(env){
@@ -129,10 +124,10 @@ return r.results
 }
 
 async function getProviders(env){
-const rows=await env.DB.prepare(`SELECT org, COUNT(*) total
+const r=await env.DB.prepare(`SELECT org, COUNT(*) total
 FROM ip_geo
 GROUP BY org`).all()
-return rows.results
+return r.results
 }
 
 async function getMap(env){
@@ -146,14 +141,13 @@ async function getAttackTimeline(env){
 const r=await env.DB.prepare(`SELECT date(detected_at/1000,'unixepoch') day,
 COUNT(*) attacks
 FROM spoof_events
-GROUP BY day
-ORDER BY day`).all()
+GROUP BY day`).all()
 return r.results
 }
 
 async function calculateScore(env){
 
-const stats = await getSummary(env)
+const stats=await getSummary(env)
 
 if(!stats.total) return {score:0}
 
@@ -171,10 +165,6 @@ return {score:Math.round(score)}
 
 }
 
-async function detectAnomalies(env){
-return []
-}
-
 const html = `
 
 <html>
@@ -185,84 +175,62 @@ const html = `
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
-
-<link rel="stylesheet"
-href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
-
 <style>
 
 body{
-background:#0f172a;
-color:white;
 font-family:system-ui;
 margin:0;
+background:#f3f4f6;
 }
 
-.nav{
-background:#0b0b0b;
-border-bottom:3px solid #e30613;
-padding:12px 25px;
+.header{
 display:flex;
 align-items:center;
 gap:15px;
+padding:15px 30px;
+background:white;
+border-bottom:3px solid #e30613;
 }
 
-.logo{height:32px}
+.logo{height:36px}
 
 .container{
-padding:20px;
 max-width:1600px;
 margin:auto;
+padding:25px;
 }
 
 .grid{
 display:grid;
-grid-template-columns:repeat(4,1fr);
-gap:15px;
+grid-template-columns:repeat(3,1fr);
+gap:20px;
 }
 
 .card{
-background:#1e293b;
-padding:15px;
+background:white;
+padding:20px;
 border-radius:8px;
+box-shadow:0 2px 6px rgba(0,0,0,0.06);
 }
 
 .card h3{
 font-size:14px;
+color:#666;
 margin-bottom:10px;
-color:#cbd5e1;
 }
 
 .score{
-font-size:34px;
+font-size:36px;
 font-weight:bold;
 color:#e30613;
 }
 
 canvas{
-background:white;
-border-radius:8px;
-padding:6px;
-height:220px!important;
-}
-
-#map{
-height:220px;
-border-radius:8px;
+height:200px!important;
 }
 
 .span2{
 grid-column:span 2;
-}
-
-.span4{
-grid-column:span 4;
-}
-
-ul{
-margin:0;
-padding-left:18px;
 }
 
 </style>
@@ -271,7 +239,7 @@ padding-left:18px;
 
 <body>
 
-<div class="nav">
+<div class="header">
 
 <img src="https://static.vinet.co.za/logo.jpeg" class="logo">
 
@@ -293,7 +261,7 @@ padding-left:18px;
 <div id="compliance" class="score"></div>
 </div>
 
-<div class="card span2">
+<div class="card">
 <h3>Email Authentication</h3>
 <ul id="scan"></ul>
 </div>
@@ -308,24 +276,19 @@ padding-left:18px;
 <canvas id="attacks"></canvas>
 </div>
 
-<div class="card span2">
+<div class="card">
 <h3>Providers</h3>
 <canvas id="providers"></canvas>
 </div>
 
-<div class="card span2">
+<div class="card">
 <h3>Top Senders</h3>
 <canvas id="senders"></canvas>
 </div>
 
-<div class="card span2">
+<div class="card">
 <h3>Domains</h3>
 <canvas id="domains"></canvas>
-</div>
-
-<div class="card span2">
-<h3>Global Sources</h3>
-<div id="map"></div>
 </div>
 
 </div>
@@ -368,29 +331,12 @@ const d=await r.json()
 new Chart(canvas,{
 type:'bar',
 data:{
-labels:d.map(x=>x.day||x.provider||x.source_ip||x.domain),
+labels:d.map(x=>x.day||x.source_ip||x.domain||x.org),
 datasets:[{
 label:label,
 data:d.map(x=>x.total||x.attacks)
 }]
 }
-})
-
-}
-
-async function loadMap(){
-
-const r=await fetch('/api/map')
-const d=await r.json()
-
-const map=L.map('map').setView([20,0],2)
-
-L.tileLayer(
-'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
-).addTo(map)
-
-d.forEach(p=>{
-L.marker([p.lat,p.lon]).addTo(map)
 })
 
 }
@@ -403,8 +349,6 @@ chart('/api/attack_timeline',attacks,'Spoof Attacks')
 chart('/api/providers',providers,'Providers')
 chart('/api/senders',senders,'Emails')
 chart('/api/domains',domains,'Emails')
-
-loadMap()
 
 </script>
 
