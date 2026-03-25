@@ -89,60 +89,81 @@ return {spf,dmarc,dkim,bimi,mx,compliance}
 }
 
 async function getSummary(env){
+
 return await env.DB.prepare(`SELECT
 SUM(count) total,
 SUM(CASE WHEN spf='pass' THEN count ELSE 0 END) spf_pass,
 SUM(CASE WHEN dkim='pass' THEN count ELSE 0 END) dkim_pass,
 SUM(CASE WHEN disposition!='none' THEN count ELSE 0 END) failures
 FROM dmarc_records`).first()
+
 }
 
 async function getTimeline(env){
+
 const r=await env.DB.prepare(`SELECT date(created_at/1000,'unixepoch') day,
 SUM(count) total
 FROM dmarc_records
 GROUP BY day
 ORDER BY day`).all()
+
 return r.results
+
 }
 
 async function getSenders(env){
+
 const r=await env.DB.prepare(`SELECT source_ip, SUM(count) total
 FROM dmarc_records
 GROUP BY source_ip
 ORDER BY total DESC
 LIMIT 10`).all()
+
 return r.results
+
 }
 
 async function getDomains(env){
+
 const r=await env.DB.prepare(`SELECT domain, SUM(count) total
 FROM dmarc_records
 GROUP BY domain
 ORDER BY total DESC`).all()
+
 return r.results
+
 }
 
 async function getProviders(env){
+
 const r=await env.DB.prepare(`SELECT org, COUNT(*) total
 FROM ip_geo
 GROUP BY org`).all()
+
 return r.results
+
 }
 
 async function getMap(env){
-const r=await env.DB.prepare(`SELECT lat,lon FROM ip_geo
+
+const r=await env.DB.prepare(`SELECT lat,lon
+FROM ip_geo
 WHERE lat IS NOT NULL
 LIMIT 200`).all()
+
 return r.results
+
 }
 
 async function getAttackTimeline(env){
+
 const r=await env.DB.prepare(`SELECT date(detected_at/1000,'unixepoch') day,
 COUNT(*) attacks
 FROM spoof_events
 GROUP BY day`).all()
+
 return r.results
+
 }
 
 async function calculateScore(env){
@@ -175,21 +196,30 @@ const html = `
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
+<link
+rel="stylesheet"
+href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+/>
+
+<script
+src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+></script>
+
 <style>
 
 body{
 font-family:system-ui;
 margin:0;
-background:#f3f4f6;
+background:#f4f6f9;
 }
 
 .header{
+background:white;
+border-bottom:3px solid #e30613;
+padding:15px 25px;
 display:flex;
 align-items:center;
 gap:15px;
-padding:15px 30px;
-background:white;
-border-bottom:3px solid #e30613;
 }
 
 .logo{height:36px}
@@ -210,7 +240,7 @@ gap:20px;
 background:white;
 padding:20px;
 border-radius:8px;
-box-shadow:0 2px 6px rgba(0,0,0,0.06);
+box-shadow:0 1px 4px rgba(0,0,0,0.08);
 }
 
 .card h3{
@@ -219,7 +249,7 @@ color:#666;
 margin-bottom:10px;
 }
 
-.score{
+.metric{
 font-size:36px;
 font-weight:bold;
 color:#e30613;
@@ -229,8 +259,8 @@ canvas{
 height:200px!important;
 }
 
-.span2{
-grid-column:span 2;
+#map{
+height:260px;
 }
 
 </style>
@@ -253,12 +283,12 @@ grid-column:span 2;
 
 <div class="card">
 <h3>Security Score</h3>
-<div id="score" class="score"></div>
+<div id="score" class="metric"></div>
 </div>
 
 <div class="card">
 <h3>DMARC Compliance</h3>
-<div id="compliance" class="score"></div>
+<div id="compliance" class="metric"></div>
 </div>
 
 <div class="card">
@@ -266,12 +296,12 @@ grid-column:span 2;
 <ul id="scan"></ul>
 </div>
 
-<div class="card span2">
+<div class="card">
 <h3>Email Timeline</h3>
 <canvas id="timeline"></canvas>
 </div>
 
-<div class="card span2">
+<div class="card">
 <h3>Spoof Attacks</h3>
 <canvas id="attacks"></canvas>
 </div>
@@ -291,18 +321,48 @@ grid-column:span 2;
 <canvas id="domains"></canvas>
 </div>
 
+<div class="card">
+<h3>Global Mail Sources</h3>
+<div id="map"></div>
+</div>
+
 </div>
 
 </div>
 
 <script>
 
+function animateValue(el,end){
+
+let start=0
+let duration=800
+let step=end/20
+
+function update(){
+
+start+=step
+
+if(start>=end){
+el.innerHTML=end
+return
+}
+
+el.innerHTML=Math.round(start)
+
+requestAnimationFrame(update)
+
+}
+
+update()
+
+}
+
 async function loadScore(){
 
 const r=await fetch('/api/score')
 const d=await r.json()
 
-score.innerHTML=d.score
+animateValue(score,d.score)
 
 }
 
@@ -319,7 +379,7 @@ scan.innerHTML+="<li>DKIM: "+d.dkim+"</li>"
 scan.innerHTML+="<li>BIMI: "+d.bimi+"</li>"
 scan.innerHTML+="<li>MX: "+d.mx+"</li>"
 
-compliance.innerHTML=d.compliance+"%"
+animateValue(compliance,d.compliance)
 
 }
 
@@ -334,9 +394,33 @@ data:{
 labels:d.map(x=>x.day||x.source_ip||x.domain||x.org),
 datasets:[{
 label:label,
-data:d.map(x=>x.total||x.attacks)
+data:d.map(x=>x.total||x.attacks),
+backgroundColor:"#e30613"
 }]
+},
+options:{
+plugins:{legend:{display:false}}
 }
+})
+
+}
+
+async function loadMap(){
+
+const r=await fetch('/api/map')
+const d=await r.json()
+
+const map=L.map('map').setView([20,0],2)
+
+L.tileLayer(
+'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+).addTo(map)
+
+d.forEach(p=>{
+L.circleMarker([p.lat,p.lon],{
+radius:4,
+color:"#e30613"
+}).addTo(map)
 })
 
 }
@@ -349,6 +433,8 @@ chart('/api/attack_timeline',attacks,'Spoof Attacks')
 chart('/api/providers',providers,'Providers')
 chart('/api/senders',senders,'Emails')
 chart('/api/domains',domains,'Emails')
+
+loadMap()
 
 </script>
 
