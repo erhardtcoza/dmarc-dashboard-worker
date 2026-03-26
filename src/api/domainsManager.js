@@ -1,11 +1,13 @@
-import { dnsQuery } from "../dns/dnsLookup.js"
+export async function addDomain(env, domain){
 
-export async function addDomain(env,domain){
+if(!domain) return {error:"domain required"}
 
 await env.DB.prepare(`INSERT OR IGNORE INTO domains(domain,added_at)
-VALUES(?,?)`).bind(domain,Date.now()).run()
+VALUES(?,?)`)
+.bind(domain, Date.now())
+.run()
 
-return {status:"added",domain}
+return {status:"added", domain}
 
 }
 
@@ -18,40 +20,41 @@ return r.results
 
 }
 
-export async function scanDomain(env,domain){
+export async function removeDomain(env, domain){
 
-const spf = await dnsQuery(domain,"TXT")
-const dmarc = await dnsQuery("_dmarc."+domain,"TXT")
-const mx = await dnsQuery(domain,"MX")
+if(!domain) return {error:"domain required"}
 
-let score = 100
+await env.DB.prepare(`DELETE FROM domains
+WHERE domain=?`)
+.bind(domain)
+.run()
 
-if(!spf.length) score -= 30
-if(!dmarc.length) score -= 40
-if(!mx.length) score -= 20
+return {status:"removed", domain}
+
+}
+
+export async function scanDomain(env, domain){
+
+if(!domain) return {error:"domain required"}
+
+const dns = await fetch(
+"https://cloudflare-dns.com/dns-query?name="+domain+"&type=TXT",
+{headers:{accept:"application/dns-json"}}
+)
+
+const txt = await dns.json()
+
+const records = txt.Answer ? txt.Answer.map(x=>x.data) : []
 
 await env.DB.prepare(`UPDATE domains
-SET
-spf=?,
-dmarc=?,
-mx=?,
-score=?,
-last_scan=?
-WHERE domain=?`).bind(
-JSON.stringify(spf),
-JSON.stringify(dmarc),
-JSON.stringify(mx),
-score,
-Date.now(),
-domain
-).run()
+SET last_scan=?
+WHERE domain=?`)
+.bind(Date.now(),domain)
+.run()
 
-return{
+return {
 domain,
-spf,
-dmarc,
-mx,
-score
+records
 }
 
 }
