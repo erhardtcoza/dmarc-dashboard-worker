@@ -1,8 +1,9 @@
-
 <html>
 
 <head>
+
 <title>Vinet DMARC Security Platform</title>
+
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <style>
@@ -39,6 +40,22 @@ margin-bottom:20px;
 box-shadow:0 2px 6px rgba(0,0,0,.08);
 }
 
+.grid{
+display:grid;
+grid-template-columns:repeat(3,1fr);
+gap:20px;
+}
+
+table{
+width:100%;
+border-collapse:collapse;
+}
+
+td,th{
+padding:6px;
+border-bottom:1px solid #eee;
+}
+
 </style>
 
 </head>
@@ -66,7 +83,7 @@ box-shadow:0 2px 6px rgba(0,0,0,.08);
 
 <h3>Monitored Domains</h3>
 
-<table id="domains"></table>
+<table id="domainsTable"></table>
 
 </div>
 
@@ -74,11 +91,38 @@ box-shadow:0 2px 6px rgba(0,0,0,.08);
 
 <h3>Scan Domain</h3>
 
-<input id="scanDomainInput" placeholder="domain.com">
+<input id="scanInput" placeholder="domain.com">
 
 <button onclick="scanDomain()">Scan</button>
 
-<div id="scanResults"></div>
+<pre id="scanResults"></pre>
+
+</div>
+
+<div class="grid">
+
+<div class="card">
+<h3>Email Timeline</h3>
+<canvas id="timeline"></canvas>
+</div>
+
+<div class="card">
+<h3>Top Senders</h3>
+<canvas id="senders"></canvas>
+</div>
+
+<div class="card">
+<h3>Domains</h3>
+<canvas id="domainsChart"></canvas>
+</div>
+
+</div>
+
+<div class="card">
+
+<h3>Sender Reputation</h3>
+
+<table id="reputation"></table>
 
 </div>
 
@@ -97,12 +141,12 @@ d.forEach(x=>{
 
 html+="<tr>"
 html+="<td>"+x.domain+"</td>"
-html+="<td><button onclick='removeDomain(""+x.domain+"")'>Remove</button></td>"
+html+="<td><button onclick='removeDomain(\""+x.domain+"\")'>Remove</button></td>"
 html+="</tr>"
 
 })
 
-domains.innerHTML=html
+domainsTable.innerHTML=html
 
 }
 
@@ -132,17 +176,100 @@ loadDomains()
 
 async function scanDomain(){
 
-const domain=document.getElementById("scanDomainInput").value
+const domain=document.getElementById("scanInput").value
 
-const r = await fetch("/api/domain_lookup?domain="+domain)
+const r=await fetch("/api/domain_lookup?domain="+domain)
 
-const d = await r.json()
+const d=await r.json()
 
-scanResults.innerHTML=JSON.stringify(d,null,2)
+scanResults.innerText=JSON.stringify(d,null,2)
+
+}
+
+async function loadTimeline(){
+
+const r=await fetch("/api/timeline")
+const d=await r.json()
+
+new Chart(timeline,{
+type:"bar",
+data:{
+labels:d.map(x=>x.day),
+datasets:[{
+label:"Emails",
+data:d.map(x=>x.total),
+backgroundColor:"#e30613"
+}]
+}
+})
+
+}
+
+async function loadSenders(){
+
+const r=await fetch("/api/senders")
+const d=await r.json()
+
+new Chart(senders,{
+type:"bar",
+data:{
+labels:d.map(x=>x.source_ip),
+datasets:[{
+label:"Emails",
+data:d.map(x=>x.total),
+backgroundColor:"#e30613"
+}]
+}
+})
+
+}
+
+async function loadDomainsChart(){
+
+const r=await fetch("/api/domains")
+const d=await r.json()
+
+new Chart(domainsChart,{
+type:"bar",
+data:{
+labels:d.map(x=>x.domain),
+datasets:[{
+label:"Emails",
+data:d.map(x=>x.total),
+backgroundColor:"#e30613"
+}]
+}
+})
+
+}
+
+async function loadReputation(){
+
+const r=await fetch("/api/reputation")
+const d=await r.json()
+
+let html="<tr><th>IP</th><th>Total</th><th>Failures</th><th>Status</th></tr>"
+
+d.forEach(x=>{
+
+html+="<tr>"
+html+="<td>"+x.ip+"</td>"
+html+="<td>"+x.total+"</td>"
+html+="<td>"+x.failures+"</td>"
+html+="<td>"+x.status+"</td>"
+html+="</tr>"
+
+})
+
+reputation.innerHTML=html
 
 }
 
 loadDomains()
+loadTimeline()
+loadSenders()
+loadDomainsChart()
+loadReputation()
 
 </script>
 
